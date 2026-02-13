@@ -371,6 +371,12 @@ function renderStatus(payload) {
 
     if (active.blocked) {
       text += `\n⚠️ BLOCKED: Solve challenge at ${active.blockedUrl}`;
+      if (active.blockRetryAt) {
+        const leftSec = Math.max(0, Math.ceil((Number(active.blockRetryAt) - Date.now()) / 1000));
+        if (leftSec > 0) {
+          text += `\n⏳ Auto-retry in ~${leftSec}s`;
+        }
+      }
       statusEl.classList.add('blocked');
     } else {
       statusEl.classList.remove('blocked');

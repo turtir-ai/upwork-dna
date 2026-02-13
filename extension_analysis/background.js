@@ -7,10 +7,12 @@ const ORCHESTRATOR_API_BASES = Array.from(
   new Set([ORCHESTRATOR_API_BASE, "http://127.0.0.1:8000", "http://localhost:8000"])
 );
 const ORCHESTRATOR_TIMEOUT_MS = 4000;
-const MAX_API_KEYWORD_INJECTION = 8;
+const MAX_API_KEYWORD_INJECTION = 5;
 const API_KEYWORD_SYNC_COOLDOWN_MS = 15000;
 const QUEUE_PROCESSOR_TICK_MS = 8000;
 const LIST_NAV_DELAY_RANGE = { min: 2500, max: 5000 };
+const BLOCK_RETRY_DELAY_RANGE = { min: 90000, max: 180000 };
+const BLOCK_MAX_RETRIES = 2;
 
 const BACKEND_PROFILE_SYNC_ENDPOINTS = [
   "http://127.0.0.1:8000/v1/llm/profile/sync",
@@ -980,6 +982,7 @@ async function startRun(config) {
     id: runId,
     keyword,
     targets,
+    queueKeywordId: config.queueKeywordId || null,
     startedAt: nowIso(),
     finishedAt: null,
     status: "running",
@@ -1007,7 +1010,9 @@ async function startRun(config) {
     detailIndex: 0,
     detailTotal: 0,
     detailTarget: null,
-    detailMode: null
+    detailMode: null,
+    blockRetryCount: 0,
+    blockRetryAt: null
   };
 
   await setState(state);
@@ -1398,8 +1403,50 @@ async function handlePageBlocked(message) {
 
   state.active.blocked = true;
   state.active.blockedUrl = message.pageUrl || "";
+  state.active.blockRetryCount = (state.active.blockRetryCount || 0) + 1;
+
+  const run = state.runs[state.active.runId];
+  if (state.active.blockRetryCount <= BLOCK_MAX_RETRIES) {
+    const retryInMs = randomDelay(BLOCK_RETRY_DELAY_RANGE.min, BLOCK_RETRY_DELAY_RANGE.max);
+    state.active.blockRetryAt = Date.now() + retryInMs;
+    const tabId = state.active.tabId;
+    const retryUrl = state.active.blockedUrl;
+    const runId = state.active.runId;
+    const retryCount = state.active.blockRetryCount;
+    await setState(state);
+
+    setTimeout(async () => {
+      const latest = await getState();
+      if (!latest.active || latest.active.runId !== runId) {
+        return;
+      }
+      if ((latest.active.blockRetryCount || 0) !== retryCount) {
+        return;
+      }
+      if (latest.active.tabId !== tabId || !retryUrl) {
+        return;
+      }
+      await new Promise((resolve) => {
+        chrome.tabs.update(tabId, { url: retryUrl }, () => resolve());
+      });
+    }, retryInMs);
+
+    return { ok: true, action: "retry_scheduled", retryInMs, retryCount };
+  }
+
+  if (run) {
+    run.status = "blocked";
+    run.finishedAt = nowIso();
+  }
+
+  if (run && run.queueKeywordId) {
+    await QueueMgr.errorKeyword(run.queueKeywordId, "Blocked by anti-bot challenge");
+  }
+
+  state.active = null;
   await setState(state);
-  return { ok: true };
+  await QueueMgr.pauseQueue();
+  return { ok: true, action: "queue_paused_blocked" };
 }
 
 async function handleGetStatus() {
@@ -1418,7 +1465,9 @@ async function handleGetStatus() {
           detailIndex: state.active.detailIndex || 0,
           detailTotal: state.active.detailTotal || 0,
           blocked: state.active.blocked,
-          blockedUrl: state.active.blockedUrl
+          blockedUrl: state.active.blockedUrl,
+          blockRetryAt: state.active.blockRetryAt || null,
+          blockRetryCount: state.active.blockRetryCount || 0
         }
       : null,
     activeSummary: buildSummary(activeRun),
