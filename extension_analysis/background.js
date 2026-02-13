@@ -9,6 +9,8 @@ const ORCHESTRATOR_API_BASES = Array.from(
 const ORCHESTRATOR_TIMEOUT_MS = 4000;
 const MAX_API_KEYWORD_INJECTION = 8;
 const API_KEYWORD_SYNC_COOLDOWN_MS = 15000;
+const QUEUE_PROCESSOR_TICK_MS = 8000;
+const LIST_NAV_DELAY_RANGE = { min: 2500, max: 5000 };
 
 const BACKEND_PROFILE_SYNC_ENDPOINTS = [
   "http://127.0.0.1:8000/v1/llm/profile/sync",
@@ -100,14 +102,14 @@ const QueueMgr = {
     isRunning: false,
     isPaused: false,
     settings: {
-      delayBetweenKeywords: { min: 60000, max: 180000 },
+      delayBetweenKeywords: { min: 120000, max: 300000 },
       autoSave: true,
       autoExport: true,
       retryOnError: true,
       maxRetries: 3,
       dailyLimit: 100,
       targets: ["jobs", "talent", "projects"],
-      maxPages: 0
+      maxPages: 3
     },
     stats: {
       totalProcessed: 0,
@@ -116,7 +118,8 @@ const QueueMgr = {
       lastResetDate: null,
       startTime: null,
       totalItems: { jobs: 0, talent: 0, projects: 0 }
-    }
+    },
+    nextRunNotBefore: 0
   },
 
   async getQueue() {
@@ -213,6 +216,9 @@ const QueueMgr = {
     queue.stats.totalItems.jobs += results?.jobs || 0;
     queue.stats.totalItems.talent += results?.talent || 0;
     queue.stats.totalItems.projects += results?.projects || 0;
+
+    const delayRange = queue.settings.delayBetweenKeywords || { min: 120000, max: 300000 };
+    queue.nextRunNotBefore = Date.now() + randomDelay(delayRange.min, delayRange.max);
 
     await this.saveQueue(queue);
     return kw;
@@ -363,6 +369,15 @@ async function startQueueProcessor() {
     const queue = await QueueMgr.getQueue();
     if (!queue.isRunning || queue.isPaused) return;
 
+    if (queue.nextRunNotBefore && Date.now() < Number(queue.nextRunNotBefore || 0)) {
+      return;
+    }
+
+    const state = await getState();
+    if (state.active) {
+      return;
+    }
+
     const nextKw = QueueMgr.getNextPendingKeyword(queue);
     if (!nextKw) {
       // All done
@@ -388,7 +403,7 @@ async function startQueueProcessor() {
       if (kw) kw.runId = result.runId;
       await QueueMgr.saveQueue(q);
     }
-  }, 5000);
+  }, QUEUE_PROCESSOR_TICK_MS);
 }
 
 function stopQueueProcessor() {
@@ -949,7 +964,11 @@ async function startRun(config) {
   }
 
   const keyword = (config.keyword || "").trim();
-  const targets = (config.targets || []).map(normalizeTarget).filter(Boolean);
+  const rawTargets = (config.targets || []).map(normalizeTarget).filter(Boolean);
+  const targets = [
+    ...rawTargets.filter((t) => t === "jobs"),
+    ...rawTargets.filter((t) => t !== "jobs")
+  ].filter((value, index, arr) => arr.indexOf(value) === index);
   const maxPages = Number(config.maxPages) || 0;
 
   if (!keyword || targets.length === 0) {
@@ -1253,7 +1272,7 @@ async function handlePageResults(message) {
     }
 
     await setState(state);
-    await delay(1200);
+    await delay(randomDelay(LIST_NAV_DELAY_RANGE.min, LIST_NAV_DELAY_RANGE.max));
     await new Promise((resolve) => {
       chrome.tabs.update(state.active.tabId, { url: nextUrl }, () => resolve());
     });
@@ -1693,8 +1712,8 @@ async function loadAutoKeywords() {
     queue.keywords.push({
       id: `kw_auto_${Date.now()}_${addedCount}`,
       keyword: kw.keyword,
-      targets: ["jobs", "talent", "projects"],
-      maxPages: 7,
+      targets: ["jobs"],
+      maxPages: 3,
       status: "pending",
       addedAt: now,
       startedAt: null,
@@ -1762,8 +1781,8 @@ async function syncRecommendedKeywordsFromApi(limit = MAX_API_KEYWORD_INJECTION)
     queue.keywords.push({
       id: `kw_api_${Date.now()}_${addedCount}`,
       keyword,
-      targets: ["jobs", "talent", "projects"],
-      maxPages: 7,
+      targets: ["jobs"],
+      maxPages: 3,
       status: "pending",
       addedAt: nowIsoText,
       startedAt: null,
