@@ -129,6 +129,14 @@ async function clearQueue() {
 }
 
 async function startQueue() {
+  const status = await sendMessage({ type: 'QUEUE_GET_STATUS' });
+  if (status?.ok && (status.summary?.pending || 0) === 0) {
+    const sync = await sendMessage({ type: 'QUEUE_SYNC_RECOMMENDED_API' });
+    if (sync?.ok && (sync.addedCount || 0) > 0) {
+      setStatus(`Auto-added ${sync.addedCount} profile-aligned keywords (${sync.source || 'api'}).`);
+    }
+  }
+
   const response = await sendMessage({ type: 'QUEUE_START', keywords: [], options: {} });
   if (response.ok) {
     setStatus('Queue processing started.');

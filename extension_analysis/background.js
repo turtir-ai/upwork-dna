@@ -2,6 +2,13 @@ const STATE_KEY = "upwork_scraper_state";
 const QUEUE_KEY = "upwork_scraper_queue";
 const QUEUE_STATS_KEY = "upwork_scraper_queue_stats";
 const PROFILE_SYNC_KEY = "upwork_profile_sync_state";
+const ORCHESTRATOR_API_BASE = "http://127.0.0.1:8000";
+const ORCHESTRATOR_API_BASES = Array.from(
+  new Set([ORCHESTRATOR_API_BASE, "http://127.0.0.1:8000", "http://localhost:8000"])
+);
+const ORCHESTRATOR_TIMEOUT_MS = 4000;
+const MAX_API_KEYWORD_INJECTION = 8;
+const API_KEYWORD_SYNC_COOLDOWN_MS = 15000;
 
 const BACKEND_PROFILE_SYNC_ENDPOINTS = [
   "http://127.0.0.1:8000/v1/llm/profile/sync",
@@ -9,6 +16,21 @@ const BACKEND_PROFILE_SYNC_ENDPOINTS = [
 ];
 const PROFILE_AUTO_SYNC_COOLDOWN_MS = 1000 * 60 * 30;
 const DEFAULT_UPWORK_PROFILE_URL = "https://www.upwork.com/freelancers/ttimur";
+let activeOrchestratorBase = ORCHESTRATOR_API_BASES[0];
+let lastApiKeywordSyncAttemptAt = 0;
+
+const AUTO_KEYWORDS = [
+  { keyword: "AI agent", priority: "HIGH", score: 86 },
+  { keyword: "n8n automation", priority: "HIGH", score: 85 },
+  { keyword: "LangChain developer", priority: "HIGH", score: 83 },
+  { keyword: "RAG system", priority: "HIGH", score: 84 },
+  { keyword: "FastAPI backend", priority: "HIGH", score: 82 },
+  { keyword: "workflow automation", priority: "HIGH", score: 82 },
+  { keyword: "Python automation", priority: "HIGH", score: 80 },
+  { keyword: "API integration", priority: "HIGH", score: 81 },
+  { keyword: "web scraping", priority: "NORMAL", score: 74 },
+  { keyword: "data pipeline", priority: "NORMAL", score: 73 }
+];
 
 // Import shared utilities
 function storageGet(key) {
@@ -21,6 +43,53 @@ function storageSet(data) {
   return new Promise((resolve) => {
     chrome.storage.local.set(data, () => resolve());
   });
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = ORCHESTRATOR_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function getOrchestratorBaseCandidates() {
+  const seen = new Set();
+  const ordered = [];
+  [activeOrchestratorBase, ...ORCHESTRATOR_API_BASES].forEach((base) => {
+    const normalized = String(base || "").trim();
+    if (!normalized || seen.has(normalized)) {
+      return;
+    }
+    seen.add(normalized);
+    ordered.push(normalized);
+  });
+  return ordered;
+}
+
+async function requestOrchestrator(endpoint, options = {}, timeoutMs = ORCHESTRATOR_TIMEOUT_MS) {
+  const bases = getOrchestratorBaseCandidates();
+  let lastError = "Failed to fetch";
+
+  for (const base of bases) {
+    try {
+      const response = await fetchWithTimeout(`${base}${endpoint}`, options, timeoutMs);
+      if (response.ok) {
+        activeOrchestratorBase = base;
+        return { ok: true, response, base };
+      }
+      if (response.status === 404 || response.status === 502 || response.status === 503) {
+        continue;
+      }
+      return { ok: false, error: `HTTP ${response.status}`, status: response.status, response, base };
+    } catch (error) {
+      lastError = (error && error.message) || "Failed to fetch";
+    }
+  }
+
+  return { ok: false, error: lastError };
 }
 
 // ===== QUEUE MANAGER INTEGRATION =====
@@ -1503,7 +1572,20 @@ async function handleQueueStart(message) {
   await ensureProfileSyncedBeforeRun();
 
   await QueueMgr.addKeywords(keywords, options);
-  const queue = await QueueMgr.getQueue();
+  let queue = await QueueMgr.getQueue();
+
+  const pendingCount = queue.keywords.filter((k) => k.status === "pending").length;
+  if (pendingCount === 0) {
+    await handleQueueSyncRecommendedApi();
+    queue = await QueueMgr.getQueue();
+  }
+
+  const pendingAfterSync = queue.keywords.filter((k) => k.status === "pending").length;
+  if (pendingAfterSync === 0) {
+    const summary = await QueueMgr.getQueueSummary();
+    return { ok: false, error: "No pending keywords to process.", summary };
+  }
+
   queue.isRunning = true;
   await QueueMgr.saveQueue(queue);
 
@@ -1556,6 +1638,164 @@ async function handleQueueAdd(message) {
   return { ok: true, summary };
 }
 
+function buildProfileHintTerms(profileState) {
+  const context = (profileState && profileState.lastProfileContext) || {};
+  const text = `${context.headline || ""} ${context.profileText || ""}`.toLowerCase();
+  const tokens = new Set();
+  const regexTokens = text.match(/[a-zA-Z][a-zA-Z0-9+#.-]{2,}/g) || [];
+  for (const token of regexTokens) {
+    if (token.length >= 3) {
+      tokens.add(token);
+    }
+  }
+
+  const phrases = [
+    "n8n", "python", "fastapi", "langchain", "rag", "ai agent", "automation",
+    "api integration", "workflow automation", "web scraping", "etl", "vector database",
+    "prompt engineering", "chatbot", "sql"
+  ];
+  for (const phrase of phrases) {
+    if (text.includes(phrase)) {
+      tokens.add(phrase);
+    }
+  }
+  return tokens;
+}
+
+function isKeywordAlignedWithProfile(keyword, profileTerms) {
+  if (!keyword) return false;
+  if (!profileTerms || profileTerms.size === 0) return true;
+  const normalized = String(keyword).toLowerCase();
+  for (const term of profileTerms) {
+    if (normalized.includes(term) || term.includes(normalized)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function loadAutoKeywords() {
+  const queue = await QueueMgr.getQueue();
+  const profileState = await getProfileSyncState();
+  const profileTerms = buildProfileHintTerms(profileState);
+  const now = new Date().toISOString();
+  let addedCount = 0;
+
+  for (const kw of AUTO_KEYWORDS) {
+    if (!isKeywordAlignedWithProfile(kw.keyword, profileTerms)) {
+      continue;
+    }
+    const exists = queue.keywords.find((k) => k.keyword.toLowerCase() === kw.keyword.toLowerCase());
+    if (exists) {
+      continue;
+    }
+
+    queue.keywords.push({
+      id: `kw_auto_${Date.now()}_${addedCount}`,
+      keyword: kw.keyword,
+      targets: ["jobs", "talent", "projects"],
+      maxPages: 7,
+      status: "pending",
+      addedAt: now,
+      startedAt: null,
+      completedAt: null,
+      errorCount: 0,
+      lastError: null,
+      runId: null,
+      results: { jobs: 0, talent: 0, projects: 0 },
+      source: "auto_generated"
+    });
+    addedCount += 1;
+  }
+
+  if (addedCount > 0) {
+    await QueueMgr.saveQueue(queue);
+    return { ok: true, addedCount, source: "fallback" };
+  }
+  return { ok: false, message: "No fallback keywords added" };
+}
+
+async function syncRecommendedKeywordsFromApi(limit = MAX_API_KEYWORD_INJECTION) {
+  const now = Date.now();
+  if (now - lastApiKeywordSyncAttemptAt < API_KEYWORD_SYNC_COOLDOWN_MS) {
+    return { ok: false, message: "cooldown" };
+  }
+  lastApiKeywordSyncAttemptAt = now;
+
+  const request = await requestOrchestrator(
+    `/v1/recommendations/keywords?limit=${Math.max(1, Math.min(limit, 20))}`,
+    { method: "GET" },
+    5000
+  );
+
+  if (!request.ok || !request.response || !request.response.ok) {
+    return { ok: false, message: request.error || "api_unavailable" };
+  }
+
+  const payload = await request.response.json().catch(() => []);
+  const recommended = Array.isArray(payload) ? payload : [];
+  if (recommended.length === 0) {
+    return { ok: false, message: "no_recommendation" };
+  }
+
+  const queue = await QueueMgr.getQueue();
+  const profileState = await getProfileSyncState();
+  const profileTerms = buildProfileHintTerms(profileState);
+  const nowIsoText = new Date().toISOString();
+  let addedCount = 0;
+
+  for (const rec of recommended.slice(0, limit)) {
+    const keyword = (rec && rec.keyword ? String(rec.keyword) : "").trim();
+    if (!keyword) {
+      continue;
+    }
+    const priority = String(rec.recommended_priority || "NORMAL").toUpperCase();
+    const forceInclude = priority === "CRITICAL";
+    if (!forceInclude && !isKeywordAlignedWithProfile(keyword, profileTerms)) {
+      continue;
+    }
+    const exists = queue.keywords.find((k) => k.keyword.toLowerCase() === keyword.toLowerCase());
+    if (exists) {
+      continue;
+    }
+
+    queue.keywords.push({
+      id: `kw_api_${Date.now()}_${addedCount}`,
+      keyword,
+      targets: ["jobs", "talent", "projects"],
+      maxPages: 7,
+      status: "pending",
+      addedAt: nowIsoText,
+      startedAt: null,
+      completedAt: null,
+      errorCount: 0,
+      lastError: null,
+      runId: null,
+      results: { jobs: 0, talent: 0, projects: 0 },
+      source: "orchestrator_api"
+    });
+    addedCount += 1;
+  }
+
+  if (addedCount > 0) {
+    await QueueMgr.saveQueue(queue);
+    return { ok: true, addedCount, source: "api" };
+  }
+  return { ok: false, message: "no_profile_aligned_keyword" };
+}
+
+async function handleQueueSyncRecommendedApi() {
+  const apiResult = await syncRecommendedKeywordsFromApi(MAX_API_KEYWORD_INJECTION);
+  if (apiResult.ok) {
+    return apiResult;
+  }
+  const fallback = await loadAutoKeywords();
+  if (fallback.ok) {
+    return fallback;
+  }
+  return { ok: false, error: apiResult.message || fallback.message || "keyword_sync_failed" };
+}
+
 // Modify moveToNextTarget to handle queue completion
 const originalMoveToNextTarget = moveToNextTarget;
 moveToNextTarget = async function(state) {
@@ -1581,6 +1821,14 @@ moveToNextTarget = async function(state) {
 
   return result;
 };
+
+// ===== START QUEUE PROCESSOR ON SERVICE WORKER START =====
+startQueueProcessor();
+
+// Startup sync: pull API-recommended keywords (profile-filtered), then fallback keywords.
+setTimeout(async () => {
+  await handleQueueSyncRecommendedApi();
+}, 2000);
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const type = message && message.type;
@@ -1618,6 +1866,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (type === "QUEUE_ADD") {
     handleQueueAdd(message).then(sendResponse);
+    return true;
+  }
+
+  if (type === "QUEUE_SYNC_RECOMMENDED_API") {
+    handleQueueSyncRecommendedApi().then(sendResponse);
     return true;
   }
 
