@@ -1,0 +1,91 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Upwork DNA Scraper v2.0</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <div class="app">
+      <h1>Upwork DNA Scraper <span class="version">v2.0</span></h1>
+
+      <!-- Tabs -->
+      <div class="tabs">
+        <button class="tab active" data-tab="queue">Queue</button>
+        <button class="tab" data-tab="single">Single</button>
+      </div>
+
+      <!-- Queue Tab -->
+      <div id="queue-tab" class="tab-content active">
+        <label class="field">
+          <span>Keywords (one per line)</span>
+          <textarea id="queue-keywords" rows="5" placeholder="react developer&#10;python machine learning&#10;data visualization&#10;..."></textarea>
+        </label>
+
+        <div class="targets">
+          <label><input id="queue-target-jobs" type="checkbox" checked /> Jobs</label>
+          <label><input id="queue-target-talent" type="checkbox" /> Talent</label>
+          <label><input id="queue-target-projects" type="checkbox" /> Projects</label>
+        </div>
+
+        <label class="field">
+          <span>Max pages (0 = all)</span>
+          <input id="queue-max-pages" type="number" min="0" value="0" />
+        </label>
+
+        <div class="actions">
+          <button id="queue-add">Add to Queue</button>
+          <button id="queue-start" class="primary">Start Queue</button>
+          <button id="queue-clear" class="secondary">Clear</button>
+        </div>
+
+        <div class="queue-summary">
+          <span>Total: <strong id="queue-total">0</strong></span>
+          <span>Pending: <strong id="queue-pending">0</strong></span>
+          <span>Done: <strong id="queue-completed">0</strong></span>
+        </div>
+
+        <div class="queue-list" id="queue-list">
+          <div class="queue-empty">No keywords in queue</div>
+        </div>
+      </div>
+
+      <!-- Single Tab (Original) -->
+      <div id="single-tab" class="tab-content">
+        <label class="field">
+          <span>Keyword</span>
+          <input id="keyword" type="text" placeholder="data visualization" />
+        </label>
+
+        <div class="targets">
+          <label><input id="target-jobs" type="checkbox" checked /> Jobs</label>
+          <label><input id="target-talent" type="checkbox" /> Talent</label>
+          <label><input id="target-projects" type="checkbox" /> Projects</label>
+        </div>
+
+        <label class="field">
+          <span>Max pages (0 = all)</span>
+          <input id="max-pages" type="number" min="0" value="0" />
+        </label>
+
+        <div class="actions">
+          <button id="start">Start</button>
+          <button id="stop" class="secondary">Stop</button>
+        </div>
+
+        <div class="actions">
+          <button id="export-json" class="secondary">Export JSON</button>
+          <button id="export-csv" class="secondary">Export CSV</button>
+          <button id="clear-data" class="secondary">Clear Data</button>
+        </div>
+      </div>
+
+      <!-- Status Display (Shared) -->
+      <div id="status" class="status">Status: Idle</div>
+      <div class="hint">
+        <span id="hint-text">Queue mode: Add keywords and process them automatically.</span>
+      </div>
+    </div>
+    <script src="popup.js"></script>
+  </body>
+</html>

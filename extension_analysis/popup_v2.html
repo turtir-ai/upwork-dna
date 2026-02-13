@@ -1,0 +1,149 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Upwork DNA Scraper v2.0</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <div class="app">
+      <!-- Header -->
+      <div class="header">
+        <h1>Upwork DNA Scraper <span class="version">v2.0</span></h1>
+        <div class="tabs">
+          <button class="tab active" data-tab="queue">Queue</button>
+          <button class="tab" data-tab="single">Single</button>
+        </div>
+      </div>
+
+      <!-- Queue Tab -->
+      <div id="queue-tab" class="tab-content active">
+        <div class="queue-input-section">
+          <label class="field">
+            <span>Keywords (one per line)</span>
+            <textarea id="queue-keywords" rows="6" placeholder="data visualization&#10;react developer&#10;python machine learning&#10;..."></textarea>
+          </label>
+
+          <div class="targets">
+            <label><input id="queue-target-jobs" type="checkbox" checked /> Jobs</label>
+            <label><input id="queue-target-talent" type="checkbox" /> Talent</label>
+            <label><input id="queue-target-projects" type="checkbox" /> Projects</label>
+          </div>
+
+          <label class="field">
+            <span>Max pages (0 = all)</span>
+            <input id="queue-max-pages" type="number" min="0" value="0" />
+          </label>
+
+          <div class="actions">
+            <button id="queue-add" class="secondary">Add to Queue</button>
+            <button id="queue-clear" class="secondary danger">Clear Queue</button>
+          </div>
+        </div>
+
+        <div class="queue-status-section">
+          <div class="queue-summary">
+            <div class="summary-item">
+              <span class="label">Total</span>
+              <span id="queue-total" class="value">0</span>
+            </div>
+            <div class="summary-item pending">
+              <span class="label">Pending</span>
+              <span id="queue-pending" class="value">0</span>
+            </div>
+            <div class="summary-item running">
+              <span class="label">Running</span>
+              <span id="queue-running" class="value">0</span>
+            </div>
+            <div class="summary-item completed">
+              <span class="label">Done</span>
+              <span id="queue-completed" class="value">0</span>
+            </div>
+            <div class="summary-item error">
+              <span class="label">Errors</span>
+              <span id="queue-error" class="value">0</span>
+            </div>
+          </div>
+
+          <div class="queue-progress">
+            <div class="progress-bar">
+              <div id="queue-progress-fill" class="progress-fill"></div>
+            </div>
+            <span id="queue-progress-text" class="progress-text">0%</span>
+          </div>
+        </div>
+
+        <div class="queue-list-section">
+          <div class="section-header">
+            <h3>Queue List</h3>
+            <button id="queue-export-all" class="mini">Export All</button>
+          </div>
+          <div id="queue-list" class="queue-list">
+            <!-- Queue items will be rendered here -->
+          </div>
+        </div>
+
+        <div class="queue-controls">
+          <button id="queue-start" class="primary">Start Queue</button>
+          <button id="queue-pause" class="secondary">Pause</button>
+          <button id="queue-resume" class="secondary" style="display:none">Resume</button>
+          <button id="queue-stop" class="secondary danger">Stop</button>
+        </div>
+      </div>
+
+      <!-- Single Tab (Original) -->
+      <div id="single-tab" class="tab-content">
+        <label class="field">
+          <span>Keyword</span>
+          <input id="keyword" type="text" placeholder="data visualization" />
+        </label>
+
+        <div class="targets">
+          <label><input id="target-jobs" type="checkbox" checked /> Jobs</label>
+          <label><input id="target-talent" type="checkbox" /> Talent</label>
+          <label><input id="target-projects" type="checkbox" /> Projects</label>
+        </div>
+
+        <label class="field">
+          <span>Max pages (0 = all)</span>
+          <input id="max-pages" type="number" min="0" value="0" />
+        </label>
+
+        <div class="actions">
+          <button id="start">Start</button>
+          <button id="stop" class="secondary">Stop</button>
+        </div>
+
+        <div class="actions">
+          <button id="export-json" class="secondary">Export JSON</button>
+          <button id="export-csv" class="secondary">Export CSV</button>
+          <button id="clear-data" class="secondary">Clear Data</button>
+        </div>
+      </div>
+
+      <!-- Status Display (Shared) -->
+      <div id="status" class="status">Status: Idle</div>
+
+      <!-- Queue Stats -->
+      <div id="queue-stats" class="queue-stats" style="display:none">
+        <div class="stat-row">
+          <span>Total Processed: <strong id="stat-total-processed">0</strong></span>
+          <span>Total Jobs: <strong id="stat-total-jobs">0</strong></span>
+        </div>
+        <div class="stat-row">
+          <span>Daily: <strong id="stat-daily">0</strong>/<span id="stat-daily-limit">100</span></span>
+          <span>Total Talent: <strong id="stat-total-talent">0</strong></span>
+        </div>
+        <div class="stat-row">
+          <span>Errors: <strong id="stat-total-errors">0</strong></span>
+          <span>Total Projects: <strong id="stat-total-projects">0</strong></span>
+        </div>
+      </div>
+
+      <div class="hint">
+        <span id="hint-text">Tip: Add keywords to queue for automated batch processing.</span>
+      </div>
+    </div>
+    <script src="popup_v2.js"></script>
+  </body>
+</html>

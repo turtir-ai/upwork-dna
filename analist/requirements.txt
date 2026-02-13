@@ -1,0 +1,9 @@
+pandas
+nltk
+textblob
+scikit-learn
+numpy
+matplotlib
+seaborn
+scipy>=1.11.0
+watchdog>=3.0.0

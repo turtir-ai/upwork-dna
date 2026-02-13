@@ -1,0 +1,76 @@
+body {
+  margin: 0;
+  background: #f4f4f4;
+  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+  color: #1b1b1b;
+}
+
+.app {
+  width: 320px;
+  padding: 16px;
+}
+
+h1 {
+  font-size: 16px;
+  margin: 0 0 12px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+  font-size: 12px;
+}
+
+.field input {
+  padding: 8px 10px;
+  border: 1px solid #d0d0d0;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.targets {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-bottom: 12px;
+  font-size: 12px;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+button {
+  flex: 1;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 6px;
+  background: #1f7a3f;
+  color: #fff;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+button.secondary {
+  background: #6b6b6b;
+}
+
+.status {
+  background: #fff;
+  border: 1px solid #dcdcdc;
+  border-radius: 6px;
+  padding: 8px;
+  font-size: 12px;
+  min-height: 40px;
+  white-space: pre-line;
+}
+
+.hint {
+  font-size: 11px;
+  color: #5d5d5d;
+  margin-top: 8px;
+}

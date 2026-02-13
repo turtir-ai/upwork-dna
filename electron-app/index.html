@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Upwork DNA - Market Intelligence</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="logo">
+      <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+        <circle cx="16" cy="16" r="14" stroke="#1f7a3f" stroke-width="3" fill="none"/>
+        <path d="M10 16l4 4 8-8" stroke="#1f7a3f" stroke-width="3" stroke-linecap="round"/>
+      </svg>
+      <h1>Upwork DNA</h1>
+      <span class="version">v2.1</span>
+    </div>
+
+    <nav class="nav">
+      <button class="nav-item active" data-view="dashboard">
+        <span class="icon">📊</span>
+        Dashboard
+      </button>
+      <button class="nav-item" data-view="queue">
+        <span class="icon">📋</span>
+        Queue Manager
+      </button>
+      <button class="nav-item" data-view="insights">
+        <span class="icon">💡</span>
+        Insights
+      </button>
+      <button class="nav-item" data-view="keywords">
+        <span class="icon">🔍</span>
+        Keywords
+      </button>
+      <button class="nav-item" data-view="settings">
+        <span class="icon">⚙️</span>
+        Settings
+      </button>
+    </nav>
+
+    <div class="sidebar-footer">
+      <div class="status-indicator">
+        <span class="dot"></span>
+        <span class="label">System Active</span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Main Content -->
+  <main class="main-content">
+    <!-- Header -->
+    <header class="header">
+      <div class="header-left">
+        <h2 id="view-title">Dashboard</h2>
+        <span class="subtitle">Real-time market intelligence</span>
+      </div>
+      <div class="header-right">
+        <button class="btn btn-primary" id="refresh-btn">
+          <span>🔄</span> Refresh
+        </button>
+        <button class="btn btn-secondary" id="open-dashboard-btn">
+          <span>📈</span> Full Dashboard
+        </button>
+      </div>
+    </header>
+
+    <!-- Views Container -->
+    <div class="views-container">
+
+      <!-- Dashboard View -->
+      <div class="view active" id="dashboard-view">
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-icon">📊</div>
+            <div class="stat-content">
+              <div class="stat-value" id="total-scraped">0</div>
+              <div class="stat-label">Total Scraped</div>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon">👥</div>
+            <div class="stat-content">
+              <div class="stat-value" id="talent-count">0</div>
+              <div class="stat-label">Talent Profiles</div>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon">💼</div>
+            <div class="stat-content">
+              <div class="stat-value" id="jobs-count">0</div>
+              <div class="stat-label">Job Listings</div>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon">📦</div>
+            <div class="stat-content">
+              <div class="stat-value" id="projects-count">0</div>
+              <div class="stat-label">Projects</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="dashboard-grid">
+          <!-- Activity Log -->
+          <div class="card activity-card">
+            <div class="card-header">
+              <h3>📋 Activity Log</h3>
+            </div>
+            <div class="card-body">
+              <div class="activity-list" id="activity-list">
+                <div class="activity-item">
+                  <span class="activity-time">Now</span>
+                  <span class="activity-text">System initialized</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Streamlit Preview -->
+          <div class="card preview-card">
+            <div class="card-header">
+              <h3>📈 Analysis Dashboard</h3>
+            </div>
+            <div class="card-body">
+              <webview id="dashboard-preview"
+                       src="http://localhost:8501"
+                       style="width: 100%; height: 400px; border: none; border-radius: 8px;">
+              </webview>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Queue View -->
+      <div class="view" id="queue-view">
+        <div class="card">
+          <div class="card-header">
+            <h3>📋 Queue Manager</h3>
+            <div class="queue-actions">
+              <button class="btn btn-sm" id="add-keywords-btn">+ Add Keywords</button>
+              <button class="btn btn-sm btn-secondary" id="clear-queue-btn">Clear</button>
+            </div>
+          </div>
+          <div class="card-body">
+            <div class="queue-summary">
+              <div class="summary-item">
+                <span class="label">Total</span>
+                <span class="value" id="queue-total">0</span>
+              </div>
+              <div class="summary-item">
+                <span class="label">Pending</span>
+                <span class="value" id="queue-pending">0</span>
+              </div>
+              <div class="summary-item">
+                <span class="label">Running</span>
+                <span class="value" id="queue-running">0</span>
+              </div>
+              <div class="summary-item">
+                <span class="label">Completed</span>
+                <span class="value" id="queue-completed">0</span>
+              </div>
+            </div>
+            <div class="queue-list" id="queue-list">
+              <!-- Queue items will be inserted here -->
+              <div class="empty-state">
+                <p>No keywords in queue</p>
+                <small>Add keywords to start automatic scraping</small>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Insights View -->
+      <div class="view" id="insights-view">
+        <div class="card">
+          <div class="card-header">
+            <h3>💡 Market Insights</h3>
+          </div>
+          <div class="card-body">
+            <div class="insights-list" id="insights-list">
+              <div class="empty-state">
+                <p>Analyzing data...</p>
+                <small>Insights will appear as data is collected</small>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Keywords View -->
+      <div class="view" id="keywords-view">
+        <div class="card">
+          <div class="card-header">
+            <h3>🔍 Recommended Keywords</h3>
+            <div class="keywords-actions">
+              <button class="btn btn-sm" id="apply-keywords-btn">Apply All</button>
+            </div>
+          </div>
+          <div class="card-body">
+            <div class="keywords-list" id="keywords-list">
+              <div class="empty-state">
+                <p>Waiting for recommendations...</p>
+                <small>Data flywheel will suggest high-opportunity keywords</small>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Settings View -->
+      <div class="view" id="settings-view">
+        <div class="card">
+          <div class="card-header">
+            <h3>⚙️ Settings</h3>
+          </div>
+          <div class="card-body">
+            <div class="settings-group">
+              <h4>Automation</h4>
+              <label class="setting-item">
+                <input type="checkbox" id="auto-scrape-toggle" checked>
+                <span>Automatic scraping</span>
+              </label>
+              <label class="setting-item">
+                <input type="checkbox" id="auto-export-toggle" checked>
+                <span>Auto-export data</span>
+              </label>
+              <label class="setting-item">
+                <input type="checkbox" id="data-flywheel-toggle" checked>
+                <span>Data flywheel (auto-discover keywords)</span>
+              </label>
+            </div>
+            <div class="settings-group">
+              <h4>Scraping</h4>
+              <label class="setting-item">
+                <span>Max pages per keyword</span>
+                <input type="number" id="max-pages" value="0" min="0" max="50">
+                <small>0 = all pages</small>
+              </label>
+            </div>
+            <div class="settings-group">
+              <h4>Targets</h4>
+              <label class="setting-item">
+                <input type="checkbox" id="target-jobs" checked>
+                <span>Jobs</span>
+              </label>
+              <label class="setting-item">
+                <input type="checkbox" id="target-talent">
+                <span>Talent</span>
+              </label>
+              <label class="setting-item">
+                <input type="checkbox" id="target-projects">
+                <span>Projects</span>
+              </label>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </main>
+
+  <!-- Python Log Panel -->
+  <div class="log-panel" id="log-panel">
+    <div class="log-header">
+      <span>🖥️ Python Pipeline Log</span>
+      <button class="log-close" id="log-close">×</button>
+    </div>
+    <div class="log-content" id="log-content"></div>
+  </div>
+
+  <!-- Scripts -->
+  <script src="renderer.js"></script>
+</body>
+</html>

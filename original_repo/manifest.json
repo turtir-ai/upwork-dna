@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "Upwork DNA Scraper",
+  "version": "0.1.9",
+  "description": "Scrape Upwork jobs, talent, and projects from search results.",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Upwork DNA Scraper"
+  },
+  "permissions": ["storage", "downloads", "tabs", "unlimitedStorage"],
+  "host_permissions": ["https://www.upwork.com/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.upwork.com/nx/search/*",
+        "https://www.upwork.com/jobs/*",
+        "https://www.upwork.com/freelancers/*",
+        "https://www.upwork.com/profile/*",
+        "https://www.upwork.com/services/*"
+      ],
+      "js": ["content_script.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
