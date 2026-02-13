@@ -33,6 +33,14 @@ def get(ep, default=None, timeout=5):
     except Exception:
         return default if default is not None else {}
 
+
+def get_live(ep, default=None, timeout=5):
+    try:
+        with urlopen(Request(f"{API}{ep}", headers={"Accept": "application/json"}), timeout=timeout) as r:
+            return json.loads(r.read())
+    except Exception:
+        return default if default is not None else {}
+
 def post(ep, timeout=120):
     import urllib.request
     req = urllib.request.Request(f"{API}{ep}", data=b"{}", headers={"Content-Type": "application/json"}, method="POST")
@@ -169,6 +177,7 @@ def load():
     llm = get("/v1/llm/health", {"status": "unavailable"})
     notifs = get("/v1/llm/notifications", {"notifications": []})
     profile = get("/v1/llm/profile", {})
+    profile_live = get_live("/v1/llm/profile/competitive-live", {})
     kw_fit = get("/v1/llm/keyword-fit", [])
 
     return {
@@ -178,6 +187,7 @@ def load():
         "llm": llm,
         "notifs": notifs.get("notifications", []) if isinstance(notifs, dict) else [],
         "profile": profile,
+        "profile_live": profile_live,
         "kw_fit": kw_fit,
     }
 
@@ -189,33 +199,55 @@ def tab_decisions(data):
     """Main tab: which jobs to apply to, ranked, with actions."""
     profile = data["profile"]
     enriched = data["enriched"]
+    notifs = data.get("notifs", [])
 
     if not enriched:
         st.warning("Henüz iş verisi yok. Extension ile scraping yapın.")
         return
 
+    # Build HOT notification lookup  (job_key → notif)
+    hot_lookup = {}
+    for n in notifs:
+        if isinstance(n, dict) and n.get("priority") == "HOT":
+            hot_lookup[n.get("job_key", "")] = n
+
     df = pd.DataFrame(enriched)
     df["_r"] = df["reasons"].apply(reasons)
     df["action"] = df["_r"].apply(lambda d: d.get("llm_action", ""))
-    df["composite"] = df["_r"].apply(lambda d: d.get("composite_score", 0))
+    # Normalize composite to 0-100 consistently
+    def _norm_composite(d):
+        v = d.get("composite_score", 0)
+        if isinstance(v, (int, float)) and v <= 1:
+            return round(v * 100);
+        return round(v) if isinstance(v, (int, float)) else 0
+    df["composite"] = df["_r"].apply(_norm_composite)
     df["summary"] = df["_r"].apply(lambda d: d.get("llm_summary", ""))
     df["reasoning"] = df["_r"].apply(lambda d: d.get("llm_reasoning", ""))
     df["risk_flags"] = df["_r"].apply(lambda d: d.get("risk_flags", []))
     df["hook"] = df["_r"].apply(lambda d: d.get("opening_hook", ""))
+    df["is_hot"] = df["job_key"].isin(hot_lookup)
     if "freshness" not in df.columns:
+        df["freshness"] = 100.0
         df["freshness"] = 100.0
 
     # Controls row
-    c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
+    c1, c2, c3, c4, c5 = st.columns([1.2, 0.8, 1, 1, 1])
     with c1:
         if st.button("🤖 AI Analiz Başlat (10 iş)", type="primary", key="d_analyze"):
             with st.spinner("AI analiz ediyor… (30-120 sn)"):
                 r1 = post("/v1/llm/batch-analyze?limit=10&unanalyzed_only=true")
+                # Fallback: if strict unanalyzed shortlist returns nothing, force a fresh sample.
+                if isinstance(r1, dict) and r1.get("analyzed", 0) == 0 and r1.get("total", 0) == 0:
+                    r1 = post("/v1/llm/batch-analyze?limit=10&unanalyzed_only=false")
                 r2 = post("/v1/llm/decide?limit=20")
             if r1 and not r1.get("error"):
                 st.success(f"✅ {r1.get('analyzed', 0)} iş analiz edildi!")
             else:
                 st.error(f"Hata: {r1.get('error', 'LLM bağlantısı yok')}")
+            if isinstance(r2, dict) and not r2.get("error"):
+                st.caption(f"Decision Engine: HOT={r2.get('hot_count', 0)} | WARM={r2.get('warm_count', 0)}")
+            elif isinstance(r2, dict):
+                st.warning(f"Decision Engine uyarı: {r2.get('error', 'yanıt yok')}")
             st.cache_data.clear()
             st.rerun()
     with c2:
@@ -225,18 +257,45 @@ def tab_decisions(data):
     with c3:
         fresh_filter = st.checkbox("🟢 Sadece Taze İşler", value=True, key="d_fresh")
     with c4:
+        sort_by = st.selectbox("Sıralama", ["Taze + Skor", "Profil Uyumu", "En Yeni", "En Yüksek Skor", "Bütçe"], key="d_sort")
+    with c5:
         max_prop = st.selectbox("Max Proposals", [15, 30, 50, "Tümü"], key="d_maxp")
 
-    # Apply freshness filter to the full dataframe before splitting
+    # Apply freshness filter — but NEVER filter out HOT jobs
     if fresh_filter:
-        df = df[df["freshness"] >= 50]
+        df = df[(df["freshness"] >= 50) | (df["is_hot"])]
     if max_prop != "Tümü":
         def _parse_proposals(p):
             try:
                 return int(''.join(c for c in str(p) if c.isdigit()) or "0")
             except Exception:
                 return 0
-        df = df[df["proposals"].apply(_parse_proposals) <= int(max_prop)]
+        df = df[(df["proposals"].apply(_parse_proposals) <= int(max_prop)) | (df["is_hot"])]
+
+    # Compute profile skill match count for each row
+    _profile_skills = set()
+    for s in (profile.get("core_skills", []) + profile.get("secondary_skills", [])):
+        for w in s.lower().replace("(", " ").replace(")", " ").split(","):
+            _profile_skills.update(w.strip().split())
+    def _skill_match(skills_str):
+        if not skills_str:
+            return 0
+        job_words = set(skills_str.lower().replace(";", " ").replace(",", " ").split())
+        return len(_profile_skills & job_words)
+    df["skill_match"] = df["skills"].fillna("").apply(_skill_match)
+
+    # Sort function
+    def _sort_df(frame):
+        if sort_by == "En Yeni":
+            return frame.sort_values("freshness", ascending=False)
+        elif sort_by == "En Yüksek Skor":
+            return frame.sort_values("composite", ascending=False)
+        elif sort_by == "Bütçe":
+            return frame.sort_values("budget_value", ascending=False, na_position="last")
+        elif sort_by == "Profil Uyumu":
+            return frame.sort_values(["skill_match", "composite"], ascending=[False, False])
+        else:  # Taze + Skor (default)
+            return frame.sort_values(["freshness", "composite"], ascending=[False, False])
 
     # Separate analyzed from pending
     analyzed = df[df["action"].isin(["APPLY", "WATCH", "SKIP"])].copy()
@@ -246,13 +305,58 @@ def tab_decisions(data):
     apply_df = analyzed[analyzed["action"] == "APPLY"]
     watch_df = analyzed[analyzed["action"] == "WATCH"]
     skip_df = analyzed[analyzed["action"] == "SKIP"]
+    hot_count = len(hot_lookup)
 
-    m1, m2, m3, m4, m5 = st.columns(5)
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
     m1.metric("📊 Toplam", len(df))
-    m2.metric("✅ BAŞVUR", len(apply_df))
-    m3.metric("👀 TAKİP", len(watch_df))
-    m4.metric("⏭️ GEÇ", len(skip_df))
-    m5.metric("⏳ Bekleyen", pending_count)
+    m2.metric("🔥 HOT", hot_count)
+    m3.metric("✅ BAŞVUR", len(apply_df))
+    m4.metric("👀 TAKİP", len(watch_df))
+    m5.metric("⏭️ GEÇ", len(skip_df))
+    m6.metric("⏳ Bekleyen", pending_count)
+
+    # ── 🔥 HOT JOBS SECTION ──
+    if hot_lookup:
+        st.markdown(
+            f"""<div style="background:linear-gradient(135deg,#dc2626,#f97316);padding:14px 20px;border-radius:10px;color:white;margin:10px 0">
+            <strong style="font-size:1.15rem">🔥 {hot_count} HOT Proje — Hemen Başvurmanız Gereken Fırsatlar</strong>
+            <p style="margin:4px 0 0;opacity:0.9;font-size:0.9rem">Decision Engine tarafından yüksek öncelikli olarak işaretlendi</p>
+            </div>""", unsafe_allow_html=True)
+        # Render HOT jobs — prefer enriched card if available
+        hot_in_df = df[df["is_hot"]].copy()
+        rendered_hot_keys = set()
+        if not hot_in_df.empty:
+            hot_in_df = _sort_df(hot_in_df)
+            for _, row in hot_in_df.iterrows():
+                _render_decision_card(row, "hot", profile)
+                rendered_hot_keys.add(row.get("job_key", ""))
+        # Fallback: render remaining HOT notifications not in filtered df
+        for jk, n in hot_lookup.items():
+            if jk in rendered_hot_keys:
+                continue
+            comp_v = n.get("composite_score", 0)
+            if isinstance(comp_v, (int, float)) and comp_v <= 1:
+                comp_v = int(comp_v * 100)
+            ts = n.get("timestamp", "")
+            time_label = ""
+            if ts:
+                try:
+                    from datetime import datetime as dt
+                    delta = dt.now() - dt.fromisoformat(str(ts).replace("Z","").split("+")[0])
+                    h = delta.total_seconds() / 3600
+                    time_label = f" | 🕐 {int(h)} saat önce" if h < 24 else f" | 🕐 {int(h/24)} gün önce"
+                except Exception:
+                    pass
+            st.markdown(
+                f"""<div style="background:linear-gradient(135deg,#991b1b,#dc2626);padding:14px 18px;border-radius:10px;color:white;margin-bottom:8px">
+                <div style="display:flex;justify-content:space-between;align-items:center">
+                    <strong style="font-size:1.05rem">🔥 {n.get('title', 'Unknown')}</strong>
+                    <span style="background:rgba(255,255,255,0.2);padding:3px 12px;border-radius:20px;font-size:0.9rem">{comp_v}%</span>
+                </div>
+                <p style="margin:6px 0 2px;font-size:0.9rem;opacity:0.95">{trunc(n.get('summary', ''), 200)}</p>
+                <div style="font-size:0.85rem;opacity:0.8">{trunc(n.get('reason', ''), 200)}{time_label}</div>
+                </div>""", unsafe_allow_html=True)
+        st.divider()
 
     if analyzed.empty:
         st.info(f"Henüz AI analizi yapılmamış. {pending_count} iş bekliyor. Yukarıdaki 'AI Analiz' butonuna tıklayın.")
@@ -269,20 +373,20 @@ def tab_decisions(data):
     # ── APPLY JOBS (most important) ──
     if not apply_df.empty:
         st.markdown(f"### ✅ BAŞVUR — {len(apply_df)} İş (Hemen Başvurmanız Gerekenler)")
-        for _, row in apply_df.sort_values("composite", ascending=False).iterrows():
-            _render_decision_card(row, "apply")
+        for _, row in _sort_df(apply_df).iterrows():
+            _render_decision_card(row, "apply", profile)
 
     # ── WATCH JOBS ──
     if not watch_df.empty:
         with st.expander(f"👀 TAKİP ET — {len(watch_df)} İş (Potansiyel, yorum gerek)", expanded=len(apply_df) == 0):
-            for _, row in watch_df.sort_values("composite", ascending=False).head(15).iterrows():
-                _render_decision_card(row, "watch")
+            for _, row in _sort_df(watch_df).head(15).iterrows():
+                _render_decision_card(row, "watch", profile)
 
     # ── SKIP JOBS ──
     if not skip_df.empty:
         with st.expander(f"⏭️ GEÇ — {len(skip_df)} İş (AI'ya göre uygun değil)"):
-            for _, row in skip_df.sort_values("composite", ascending=False).head(10).iterrows():
-                _render_decision_card(row, "skip")
+            for _, row in _sort_df(skip_df).head(10).iterrows():
+                _render_decision_card(row, "skip", profile)
 
     # Download button
     st.divider()
@@ -297,7 +401,7 @@ def tab_decisions(data):
     st.caption("İndirdiğiniz dosyayı ChatGPT'ye yapıştırıp 'Hangi işlere başvurmalıyım?' diye sorabilirsiniz.")
 
 
-def _render_decision_card(row, ctype):
+def _render_decision_card(row, ctype, profile=None):
     """Render a single job decision card."""
     url = row.get("url", "")
     title = row.get("title", "Untitled")
@@ -314,8 +418,31 @@ def _render_decision_card(row, ctype):
     freshness = row.get("freshness", 100)
     scraped_at = row.get("scraped_at", "")
 
-    if isinstance(comp, float) and comp <= 1:
+    # Skill match badge
+    skill_match_html = ""
+    if profile and skills:
+        p_skills = set()
+        for s in profile.get("core_skills", []) + profile.get("secondary_skills", []):
+            p_skills.update(s.lower().replace("-", " ").split())
+        p_skills.discard("")
+        job_words = set(skills.lower().replace(";", " ").replace(",", " ").split())
+        matched = p_skills & job_words
+        match_count = len(matched)
+        if match_count >= 3:
+            match_color = "#22c55e"
+            match_label = "Harika Uyum"
+        elif match_count >= 1:
+            match_color = "#eab308"
+            match_label = "Kısmi Uyum"
+        else:
+            match_color = "#ef4444"
+            match_label = "Düşük Uyum"
+        skill_match_html = f'<span style="background:{match_color};padding:3px 8px;border-radius:20px;font-size:0.8rem;margin-left:6px">🎯 {match_count} {match_label}</span>'
+
+    if isinstance(comp, (int, float)) and comp <= 1:
         comp = int(comp * 100)
+    else:
+        comp = int(comp) if isinstance(comp, (int, float)) else 0
 
     # Freshness badge
     if freshness >= 80:
@@ -357,6 +484,7 @@ def _render_decision_card(row, ctype):
     # Colors per type
     colors = {
         "apply": ("linear-gradient(135deg,#065f46,#10b981)", "🟢"),
+        "hot": ("linear-gradient(135deg,#991b1b,#f97316)", "🔥"),
         "watch": ("linear-gradient(135deg,#92400e,#f59e0b)", "🟡"),
         "skip": ("linear-gradient(135deg,#991b1b,#ef4444)", "🔴"),
     }
@@ -389,6 +517,7 @@ def _render_decision_card(row, ctype):
                 <span style="background:rgba(255,255,255,0.15);padding:3px 8px;border-radius:20px;font-size:0.8rem">
                     {fresh_icon} {fresh_label}
                 </span>
+                {skill_match_html}
             </div>
         </div>
         <p style="margin:6px 0;font-size:0.9rem;opacity:0.95">{trunc(summary, 200)}</p>
@@ -571,6 +700,7 @@ def tab_proposal(data):
 
 def tab_profile(data):
     profile = data.get("profile", {})
+    profile_live = data.get("profile_live", {})
     kw_fit = data.get("kw_fit", [])
 
     if not profile.get("name"):
@@ -636,6 +766,44 @@ def tab_profile(data):
             icon = "🟢" if k["fit_score"] >= 0.7 else ("🟡" if k["fit_score"] >= 0.4 else "🔴")
             ex = " ⭐" if k.get("is_ideal") else (" ⛔" if k.get("is_avoid") else "")
             st.markdown(f"{icon} **{k['keyword']}** — {k['fit_score']:.0%}{ex} | _{k.get('fit_reason', '')}_")
+
+    # Live sync + competitive benchmark
+    st.divider()
+    st.markdown("### ⚡ Canlı Senkron & Rekabet Analizi")
+    if profile_live and isinstance(profile_live, dict):
+        synced_at = profile_live.get("synced_at") or "-"
+        market = profile_live.get("market_snapshot", {}) or {}
+        bench = profile_live.get("benchmark", {}) or {}
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("🔄 Son Sync", str(synced_at)[:19] if synced_at else "-")
+        c2.metric("🏁 HOT APPLY", int(market.get("hot_apply_jobs", 0)))
+        c3.metric("👥 Talent Havuzu", int(market.get("talent_scanned", 0)))
+        c4.metric("📈 Readiness", f"{bench.get('readiness_score', 0):.1f}")
+
+        b1, b2, b3 = st.columns(3)
+        b1.metric("💰 Pazar Median Rate", f"${market.get('median_hourly_rate', 0)}/hr")
+        b2.metric("⭐ Pazar Median Rating", f"{market.get('median_rating', 0)}")
+        b3.metric("📋 Deneyim Açığı", bench.get("experience_gap", 0))
+
+        actions = profile_live.get("priority_actions", []) or []
+        if actions:
+            st.markdown("**Öncelikli Aksiyonlar**")
+            for action in actions:
+                st.markdown(f"- {action}")
+
+        top_comp = profile_live.get("top_competitors", []) or []
+        if top_comp:
+            comp_df = pd.DataFrame(top_comp)
+            show_cols = [
+                c for c in [
+                    "name", "title", "hourly_rate", "rating", "jobs_completed",
+                    "skill_overlap", "competitive_score"
+                ] if c in comp_df.columns
+            ]
+            st.markdown("**En Güçlü Rakipler (Canlı Havuz)**")
+            st.dataframe(comp_df[show_cols], use_container_width=True, hide_index=True)
+    else:
+        st.info("Canlı profil benchmark verisi henüz hazır değil. Extension profil sync sonrası otomatik düşer.")
 
     # Ideal/Avoid keywords
     st.divider()
@@ -921,8 +1089,12 @@ def sidebar(data):
     if st.sidebar.button("🤖 LLM Analiz (10)", key="s_llm"):
         with st.spinner("AI analiz…"):
             r = post("/v1/llm/batch-analyze?limit=10&unanalyzed_only=true")
+            if isinstance(r, dict) and r.get("analyzed", 0) == 0 and r.get("total", 0) == 0:
+                r = post("/v1/llm/batch-analyze?limit=10&unanalyzed_only=false")
             if r and not r.get("error"):
                 st.sidebar.success(f"✅ {r.get('analyzed', 0)} analiz")
+            else:
+                st.sidebar.error(f"❌ {r.get('error', 'analiz yapılamadı') if isinstance(r, dict) else 'analiz yapılamadı'}")
         st.cache_data.clear()
         st.rerun()
 

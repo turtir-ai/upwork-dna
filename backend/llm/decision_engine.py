@@ -138,6 +138,7 @@ class DecisionEngine:
         """Rule-based classification into HOT/WARM/COLD."""
         score = analysis.composite_score
         action = analysis.recommended_action
+        risk_text = " ".join((analysis.risk_flags or [])).lower()
 
         if action == "SKIP":
             label = "COLD"
@@ -170,6 +171,18 @@ class DecisionEngine:
             label = "HOT" if label == "WARM" else "WARM"
             sensitivity = "urgent" if label == "HOT" else "normal"
             reason = f"Low competition opportunity! {reason}"
+
+        # Safety cap: never mark stale/unavailable/low-intent jobs as HOT.
+        disqualify_hot_markers = [
+            "hard_rule: job unavailable/closed",
+            "stale_signal",
+            "intent_signal",
+            "strategy_guard",
+        ]
+        if label == "HOT" and any(marker in risk_text for marker in disqualify_hot_markers):
+            label = "WARM"
+            sensitivity = "normal"
+            reason = f"De-prioritized due to risk signals: {reason}"
 
         return JobDecision(
             job_key=analysis.job_key,

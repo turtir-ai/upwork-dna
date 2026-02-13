@@ -164,8 +164,14 @@ const AntiBot = {
   },
 
   isChallengePage() {
-    const analysis = this.analyzePage();
-    return analysis.severity !== 'none';
+    const title = (document.title || "").toLowerCase();
+    if (title.includes("just a moment") || title.includes("checking your browser")) {
+      return true;
+    }
+    if (document.querySelector("form#challenge-form, .cf-challenge, .cf-turnstile")) {
+      return true;
+    }
+    return false;
   },
 
   checkRecovery() {
@@ -209,6 +215,44 @@ function detectPageType() {
 // Use AntiBot for challenge detection
 function isChallengePage() {
   return AntiBot.isChallengePage();
+}
+
+function isLoggedOut() {
+  const url = window.location.href;
+  if (url.includes("/ab/account-security/login")) return true;
+  if (url.includes("/login")) return true;
+  if (document.querySelector('a[data-qa="login"], a[href*="/ab/account-security/login"]')) {
+    const guestHeader = document.querySelector('.guest-header, .visitor-header, [data-test="guest-header"]');
+    if (guestHeader) return true;
+  }
+  return false;
+}
+
+function isRateLimited() {
+  const title = (document.title || "").toLowerCase();
+  if (title.includes("429") || title.includes("too many requests")) return true;
+
+  const errorContainer = document.querySelector(
+    '.http-error-page, .error-page, [data-test="error-page"], .air3-error-page'
+  );
+  if (errorContainer) {
+    const errorText = (errorContainer.textContent || "").toLowerCase();
+    if (
+      errorText.includes("too many requests") ||
+      errorText.includes("rate limit") ||
+      errorText.includes("try again later")
+    ) {
+      return true;
+    }
+  }
+
+  const bodyLen = ((document.body && document.body.innerText) || "").length;
+  if (bodyLen < 500) {
+    const bodyText = ((document.body && document.body.innerText) || "").toLowerCase();
+    if (bodyText.includes("429") || bodyText.includes("too many requests")) return true;
+  }
+
+  return false;
 }
 
 function waitForSelector(selector, timeoutMs) {
@@ -871,12 +915,6 @@ function applyProjectNuxtFallback(detail) {
 }
 
 async function scrapeJobs() {
-  // Pre-flight check for challenges
-  const preFlight = await AntiBot.preFlightCheck();
-  if (!preFlight.ok) {
-    return { items: [], error: "Challenge detected - please solve manually", blocked: true };
-  }
-
   const ready = await waitForSelector("[data-test='JobTile']", 15000);
   if (!ready) {
     return { items: [], error: "Job tiles not found." };
@@ -956,11 +994,6 @@ async function scrapeJobs() {
 }
 
 async function scrapeTalent() {
-  const preFlight = await AntiBot.preFlightCheck();
-  if (!preFlight.ok) {
-    return { items: [], error: "Challenge detected - please solve manually", blocked: true };
-  }
-
   const ready = await waitForSelector(
     "[data-test='ProfilesList'], [data-test='FreelancerTile']",
     15000
@@ -1286,6 +1319,15 @@ async function scrapeJobDetail(detailContext = {}) {
     detail_page_url: pageUrl,
     detail_job_key: jobKey
   };
+
+  const pageTextLower = ((document.body && document.body.innerText) || "").toLowerCase();
+  if (
+    pageTextLower.includes("this job is no longer available") ||
+    pageTextLower.includes("job is no longer available") ||
+    pageTextLower.includes("not available")
+  ) {
+    detail.detail_job_availability = "unavailable";
+  }
 
   const hasDetailContent = () =>
     Boolean(
@@ -2085,19 +2127,6 @@ async function startScrapeFlow() {
     return;
   }
 
-  // Check for challenges before starting
-  const preFlight = await AntiBot.preFlightCheck();
-  if (!preFlight.ok) {
-    // Notify background about challenge
-    chrome.runtime.sendMessage({
-      type: "PAGE_BLOCKED",
-      pageType,
-      pageUrl: window.location.href,
-      threatInfo: preFlight.analysis
-    });
-    return;
-  }
-
   chrome.runtime.sendMessage(
     {
       type: "PAGE_READY",
@@ -2114,6 +2143,25 @@ async function startScrapeFlow() {
 
       if (response.action === "SCRAPE_DETAIL") {
         const detailTarget = response.target || "jobs";
+        if (isLoggedOut()) {
+          chrome.runtime.sendMessage({
+            type: "SESSION_EXPIRED",
+            reason: "logged_out",
+            runId: response.runId,
+            target: detailTarget,
+            pageUrl: window.location.href
+          });
+          return;
+        }
+        if (isRateLimited()) {
+          chrome.runtime.sendMessage({
+            type: "RATE_LIMITED",
+            runId: response.runId,
+            target: detailTarget,
+            pageUrl: window.location.href
+          });
+          return;
+        }
         if (isChallengePage()) {
           chrome.runtime.sendMessage({
             type: "PAGE_BLOCKED",
@@ -2166,6 +2214,26 @@ async function startScrapeFlow() {
       }
 
       if (response.action !== "SCRAPE") {
+        return;
+      }
+
+      if (isLoggedOut()) {
+        chrome.runtime.sendMessage({
+          type: "SESSION_EXPIRED",
+          reason: "logged_out",
+          runId: response.runId,
+          target: pageType,
+          pageUrl: window.location.href
+        });
+        return;
+      }
+      if (isRateLimited()) {
+        chrome.runtime.sendMessage({
+          type: "RATE_LIMITED",
+          runId: response.runId,
+          target: pageType,
+          pageUrl: window.location.href
+        });
         return;
       }
 

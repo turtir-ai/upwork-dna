@@ -71,6 +71,9 @@ JOB_ANALYSIS_PROMPT = """Analyze this Upwork job posting for my profile and retu
 - Well-scoped, moderate-budget projects with verified clients = ideal
 - Prefer projects where I can deliver fast, get 5-star review, and build portfolio
 - Avoid risky/vague projects that could damage my Job Success Score
+- If signals indicate the job is unavailable/closed, do NOT recommend APPLY.
+- If posting is old (e.g., "last month") and/or client activity is stale, prefer WATCH or SKIP.
+- For low-trust clients (very low hire rate, low spend, unverified), be conservative with APPLY.
 
 ## Required JSON Output
 {{{{

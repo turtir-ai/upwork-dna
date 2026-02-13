@@ -13,6 +13,8 @@ const QUEUE_PROCESSOR_TICK_MS = 8000;
 const LIST_NAV_DELAY_RANGE = { min: 2500, max: 5000 };
 const BLOCK_RETRY_DELAY_RANGE = { min: 90000, max: 180000 };
 const BLOCK_MAX_RETRIES = 2;
+const RATE_LIMIT_COOLDOWN_MS = 3 * 60 * 1000;
+const AUTO_DECISION_COOLDOWN_MS = 45000;
 
 const BACKEND_PROFILE_SYNC_ENDPOINTS = [
   "http://127.0.0.1:8000/v1/llm/profile/sync",
@@ -22,6 +24,8 @@ const PROFILE_AUTO_SYNC_COOLDOWN_MS = 1000 * 60 * 30;
 const DEFAULT_UPWORK_PROFILE_URL = "https://www.upwork.com/freelancers/ttimur";
 let activeOrchestratorBase = ORCHESTRATOR_API_BASES[0];
 let lastApiKeywordSyncAttemptAt = 0;
+let lastQueueTelemetrySentAt = 0;
+let lastAutonomousDecisionAt = 0;
 
 const AUTO_KEYWORDS = [
   { keyword: "AI agent", priority: "HIGH", score: 86 },
@@ -96,6 +100,98 @@ async function requestOrchestrator(endpoint, options = {}, timeoutMs = ORCHESTRA
   return { ok: false, error: lastError };
 }
 
+function summarizeQueueCounts(queue) {
+  const keywords = queue && Array.isArray(queue.keywords) ? queue.keywords : [];
+  return {
+    total: keywords.length,
+    pending: keywords.filter((k) => k.status === "pending").length,
+    running: keywords.filter((k) => k.status === "running").length,
+    completed: keywords.filter((k) => k.status === "completed").length,
+    error: keywords.filter((k) => k.status === "error").length,
+    last_cycle_at: new Date().toISOString()
+  };
+}
+
+async function pushQueueTelemetry(queue, force = false) {
+  const now = Date.now();
+  if (!force && now - lastQueueTelemetrySentAt < 3000) {
+    return;
+  }
+
+  try {
+    const payload = summarizeQueueCounts(queue);
+    const req = await requestOrchestrator(
+      "/v1/telemetry/queue",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      },
+      5000
+    );
+    if (req.ok && req.response && req.response.ok) {
+      lastQueueTelemetrySentAt = now;
+    }
+  } catch (error) {
+    // best-effort telemetry
+  }
+}
+
+async function syncRunResultsToApi(runId, run) {
+  if (!runId || !run || !run.data) {
+    return { ok: false, error: "missing_run_payload" };
+  }
+
+  try {
+    const req = await requestOrchestrator(
+      "/v1/ingest/run",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ run_id: runId, run })
+      },
+      15000
+    );
+
+    if (!req.ok || !req.response || !req.response.ok) {
+      return { ok: false, error: req.error || (req.response ? `HTTP ${req.response.status}` : "ingest_failed") };
+    }
+
+    const payload = await req.response.json().catch(() => ({}));
+    return { ok: true, payload };
+  } catch (error) {
+    return { ok: false, error: (error && error.message) || "ingest_failed" };
+  }
+}
+
+async function triggerAutonomousDecisionLoop() {
+  const now = Date.now();
+  if (now - lastAutonomousDecisionAt < AUTO_DECISION_COOLDOWN_MS) {
+    return { ok: true, skipped: true, reason: "cooldown" };
+  }
+  lastAutonomousDecisionAt = now;
+
+  const analyze = await requestOrchestrator(
+    "/v1/llm/batch-analyze?limit=12&unanalyzed_only=true",
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) },
+    20000
+  );
+  if (!analyze.ok || !analyze.response || !analyze.response.ok) {
+    return { ok: false, step: "batch_analyze", error: analyze.error || "analyze_failed" };
+  }
+
+  const decide = await requestOrchestrator(
+    "/v1/llm/decide?limit=30",
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) },
+    20000
+  );
+  if (!decide.ok || !decide.response || !decide.response.ok) {
+    return { ok: false, step: "decide", error: decide.error || "decide_failed" };
+  }
+
+  return { ok: true };
+}
+
 // ===== QUEUE MANAGER INTEGRATION =====
 const QueueMgr = {
   defaultQueue: {
@@ -138,6 +234,7 @@ const QueueMgr = {
       dailyProcessed: queue.stats.dailyProcessed
     };
     await storageSet({ [QUEUE_KEY]: queue, [QUEUE_STATS_KEY]: statsToSave });
+    await pushQueueTelemetry(queue);
   },
 
   async addKeywords(keywordList, options = {}) {
@@ -295,13 +392,29 @@ const StorageMgr = {
 
   async saveFile(filename, content, mimeType) {
     return new Promise((resolve) => {
-      const blob = new Blob([content], { type: mimeType });
-      const url = URL.createObjectURL(blob);
-      chrome.downloads.download({ url, filename, saveAs: false }, (downloadId) => {
-        setTimeout(() => URL.revokeObjectURL(url), 30000);
-        if (chrome.runtime.lastError) resolve({ ok: false, error: chrome.runtime.lastError.message });
-        else resolve({ ok: true, downloadId, filename });
-      });
+      const text = typeof content === "string" ? content : JSON.stringify(content ?? {});
+      const hasObjectUrl =
+        typeof URL !== "undefined" && typeof URL.createObjectURL === "function";
+
+      const startDownload = (url, revoke = false) => {
+        chrome.downloads.download({ url, filename, saveAs: false }, (downloadId) => {
+          if (revoke && typeof URL.revokeObjectURL === "function") {
+            setTimeout(() => URL.revokeObjectURL(url), 30000);
+          }
+          if (chrome.runtime.lastError) resolve({ ok: false, error: chrome.runtime.lastError.message });
+          else resolve({ ok: true, downloadId, filename });
+        });
+      };
+
+      if (hasObjectUrl) {
+        const blob = new Blob([text], { type: mimeType });
+        const objectUrl = URL.createObjectURL(blob);
+        startDownload(objectUrl, true);
+        return;
+      }
+
+      const dataUrl = `data:${mimeType};charset=utf-8,${encodeURIComponent(text)}`;
+      startDownload(dataUrl, false);
     });
   },
 
@@ -467,7 +580,7 @@ function buildSearchUrl(target, keyword, pageIndex) {
   const page = pageIndex && pageIndex > 1 ? `&page=${pageIndex}` : "";
 
   if (target === "jobs") {
-    return `https://www.upwork.com/nx/search/jobs/?nbs=1&q=${encoded}${page}`;
+    return `https://www.upwork.com/nx/search/jobs/?nbs=1&sort=recency&q=${encoded}${page}`;
   }
   if (target === "talent") {
     return `https://www.upwork.com/nx/search/talent?q=${encoded}${page}`;
@@ -1011,6 +1124,7 @@ async function startRun(config) {
     detailTotal: 0,
     detailTarget: null,
     detailMode: null,
+    queueKeywordId: config.queueKeywordId || null,
     blockRetryCount: 0,
     blockRetryAt: null
   };
@@ -1449,6 +1563,79 @@ async function handlePageBlocked(message) {
   return { ok: true, action: "queue_paused_blocked" };
 }
 
+async function handleSessionExpired(message) {
+  const state = await getState();
+  if (!state.active) {
+    return { ok: false };
+  }
+
+  const active = state.active;
+  const run = state.runs[active.runId];
+
+  if (active.tabId !== null && active.tabId !== undefined) {
+    try {
+      await new Promise((resolve) => {
+        chrome.tabs.remove(active.tabId, () => resolve());
+      });
+    } catch (error) {}
+  }
+
+  if (run) {
+    run.status = "blocked";
+    run.finishedAt = nowIso();
+  }
+
+  if (run && run.queueKeywordId) {
+    await QueueMgr.errorKeyword(run.queueKeywordId, "Session expired (login required)");
+  }
+
+  state.active = null;
+  await setState(state);
+  await QueueMgr.pauseQueue();
+
+  return { ok: true, action: "stopped", reason: message.reason || "session_expired" };
+}
+
+async function handleRateLimited(message) {
+  const state = await getState();
+  if (!state.active) {
+    return { ok: false };
+  }
+
+  const active = state.active;
+  const run = state.runs[active.runId];
+
+  if (active.tabId !== null && active.tabId !== undefined) {
+    try {
+      await new Promise((resolve) => {
+        chrome.tabs.remove(active.tabId, () => resolve());
+      });
+    } catch (error) {}
+  }
+
+  if (run) {
+    run.status = "stopped";
+    run.finishedAt = nowIso();
+  }
+
+  if (run && run.queueKeywordId) {
+    await QueueMgr.errorKeyword(run.queueKeywordId, "Rate limited - cooldown applied");
+  }
+
+  state.active = null;
+  await setState(state);
+
+  const queue = await QueueMgr.getQueue();
+  queue.nextRunNotBefore = Date.now() + RATE_LIMIT_COOLDOWN_MS;
+  await QueueMgr.saveQueue(queue);
+
+  setTimeout(() => {
+    startQueueProcessor();
+  }, RATE_LIMIT_COOLDOWN_MS + 1000);
+
+  return { ok: true, action: "paused", reason: "rate_limited", cooldownMs: RATE_LIMIT_COOLDOWN_MS };
+}
+
 async function handleGetStatus() {
   const state = await getState();
   const activeRun = state.active ? state.runs[state.active.runId] : null;
@@ -1706,6 +1893,36 @@ async function handleQueueAdd(message) {
   return { ok: true, summary };
 }
 
+async function handleQueueRunComplete(runId, run, queueKeywordId = null) {
+  if (!runId || !run) {
+    return;
+  }
+
+  const results = {
+    jobs: (run.data && run.data.jobs ? run.data.jobs.length : 0),
+    talent: (run.data && run.data.talent ? run.data.talent.length : 0),
+    projects: (run.data && run.data.projects ? run.data.projects.length : 0)
+  };
+
+  let resolvedQueueKeywordId = queueKeywordId || run.queueKeywordId || null;
+  if (!resolvedQueueKeywordId) {
+    const queue = await QueueMgr.getQueue();
+    const linked = (queue.keywords || []).find((k) => k.runId === runId);
+    resolvedQueueKeywordId = linked ? linked.id : null;
+  }
+
+  if (resolvedQueueKeywordId) {
+    await QueueMgr.completeKeyword(resolvedQueueKeywordId, results);
+  }
+
+  await StorageMgr.autoSaveRun(runId, run);
+  await syncRunResultsToApi(runId, run);
+  await triggerAutonomousDecisionLoop();
+  setTimeout(() => {
+    handleQueueSyncRecommendedApi();
+  }, 1000);
+}
+
 function buildProfileHintTerms(profileState) {
   const context = (profileState && profileState.lastProfileContext) || {};
   const text = `${context.headline || ""} ${context.profileText || ""}`.toLowerCase();
@@ -1867,23 +2084,29 @@ async function handleQueueSyncRecommendedApi() {
 // Modify moveToNextTarget to handle queue completion
 const originalMoveToNextTarget = moveToNextTarget;
 moveToNextTarget = async function(state) {
+  const activeBefore = state && state.active ? {
+    runId: state.active.runId,
+    targetIndex: state.active.targetIndex,
+    targetsLen: (state.active.targets || []).length,
+    queueKeywordId: state.active.queueKeywordId || null
+  } : null;
+
+  const runBefore = activeBefore && activeBefore.runId && state.runs
+    ? state.runs[activeBefore.runId]
+    : null;
+  const wasFinalTarget = Boolean(
+    activeBefore &&
+    activeBefore.targetsLen > 0 &&
+    activeBefore.targetIndex >= activeBefore.targetsLen - 1
+  );
+
   const result = await originalMoveToNextTarget(state);
 
-  // Check if this was a queue run
-  const activeRun = state.active && state.runs[state.active.runId];
-  if (activeRun && activeRun.queueKeywordId) {
-    const run = state.runs[state.active.runId];
-
-    // Auto-export if enabled
-    if (run.status === "complete" || run.status === "stopped") {
-      const results = {
-        jobs: (run.data.jobs || []).length,
-        talent: (run.data.talent || []).length,
-        projects: (run.data.projects || []).length
-      };
-
-      await StorageMgr.autoSaveRun(state.active.runId, run);
-      await QueueMgr.completeKeyword(activeRun.queueKeywordId, results);
+  if (wasFinalTarget && activeBefore && activeBefore.runId) {
+    const latestState = await getState();
+    const completedRun = (latestState.runs && latestState.runs[activeBefore.runId]) || runBefore;
+    if (completedRun && (completedRun.status === "complete" || completedRun.status === "stopped")) {
+      await handleQueueRunComplete(activeBefore.runId, completedRun, activeBefore.queueKeywordId || completedRun.queueKeywordId || null);
     }
   }
 
@@ -1969,6 +2192,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (type === "PAGE_BLOCKED") {
     handlePageBlocked(message).then(sendResponse);
+    return true;
+  }
+
+  if (type === "SESSION_EXPIRED") {
+    handleSessionExpired(message).then(sendResponse);
+    return true;
+  }
+
+  if (type === "RATE_LIMITED") {
+    handleRateLimited(message).then(sendResponse);
     return true;
   }
 

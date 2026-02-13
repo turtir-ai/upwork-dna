@@ -1133,6 +1133,28 @@ class OrchestratorService:
                 "",
             )
         )
+        signal_map = [
+            ("job_availability", ["detail_job_availability"]),
+            ("posted", ["detail_posted", "posted", "posted_date"]),
+            ("activity_last_viewed", ["detail_activity_last_viewed"]),
+            ("activity_interviewing", ["detail_activity_interviewing"]),
+            ("activity_invites_sent", ["detail_activity_invites_sent"]),
+            ("activity_unanswered_invites", ["detail_activity_unanswered_invites"]),
+            ("activity_proposals", ["detail_activity_proposals"]),
+            ("client_hire_rate", ["detail_client_hire_rate"]),
+            ("client_jobs_posted", ["detail_client_jobs_posted"]),
+            ("client_open_jobs", ["detail_client_open_jobs"]),
+            ("client_member_since", ["detail_client_member_since"]),
+        ]
+        signal_lines = []
+        for label, aliases in signal_map:
+            value = normalize_text(pick_first(row, aliases, "")).strip()
+            if value:
+                signal_lines.append(f"{label}: {value}")
+        if signal_lines:
+            description = (
+                f"{description}\n\n[market_signals]\n" + "\n".join(signal_lines)
+            ).strip()
         url = normalize_text(
             pick_first(row, ["url", "job_url", "detail_job_url", "detail_url"], "")
         ).strip()

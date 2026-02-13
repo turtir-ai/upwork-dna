@@ -16,7 +16,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from database import SessionLocal, JobRaw, JobOpportunity, ProposalDraft, KeywordMetric
+from database import SessionLocal, JobRaw, JobOpportunity, ProposalDraft, KeywordMetric, TalentRaw
 from llm.client import LLMClient, LLMError, LLMConnectionError
 from llm.job_analyzer import JobAnalyzer, JobAnalysis
 from llm.decision_engine import DecisionEngine, DecisionBatch
@@ -172,6 +172,43 @@ class ProfileSyncResponse(BaseModel):
     overview: str = ""
 
 
+def _parse_skill_values(raw_value) -> list[str]:
+    if not raw_value:
+        return []
+    if isinstance(raw_value, list):
+        return [str(v).strip() for v in raw_value if str(v).strip()]
+    text = str(raw_value).strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, list):
+            return [str(v).strip() for v in parsed if str(v).strip()]
+    except Exception:
+        pass
+    return [s.strip() for s in text.replace(";", ",").split(",") if s.strip()]
+
+
+def _parse_hourly_value(raw_value, fallback: float = 0.0) -> float:
+    if raw_value is None:
+        return fallback
+    if isinstance(raw_value, (int, float)):
+        return float(raw_value)
+    digits = [c if c.isdigit() or c == "." else " " for c in str(raw_value)]
+    tokens = [t for t in "".join(digits).split() if t]
+    if not tokens:
+        return fallback
+    numbers = []
+    for token in tokens:
+        try:
+            numbers.append(float(token))
+        except Exception:
+            continue
+    if not numbers:
+        return fallback
+    return sum(numbers) / len(numbers)
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -252,41 +289,20 @@ async def batch_analyze(
                 except Exception:
                     pass
 
-            # Get best candidates by rule-based fit_score (most likely profile match)
             from orchestrator import parse_int_value
-            best_opps = db.query(JobOpportunity).order_by(
-                JobOpportunity.fit_score.desc()
-            ).limit(limit * 10).all()
-            
-            # Filter for unanalyzed, non-dead jobs
-            candidate_keys = []
-            for opp in best_opps:
-                if opp.job_key in llm_analyzed_keys:
-                    continue
-                candidate_keys.append(opp.job_key)
-                if len(candidate_keys) >= limit * 3:
-                    break
 
-            # Fetch raw jobs for candidates
-            if keyword:
-                all_jobs = query.filter(JobRaw.job_key.in_(candidate_keys)).all()
-            else:
-                all_jobs = db.query(JobRaw).filter(
-                    JobRaw.job_key.in_(candidate_keys)
-                ).all()
-            
-            # Filter out 50+ proposal (dead) jobs
+            # Recent-first selection: analyze newest unanalyzed jobs first.
+            recent_raw = query.order_by(JobRaw.scraped_at.desc()).limit(limit * 20).all()
             jobs = []
-            for j in all_jobs:
+            for j in recent_raw:
+                if j.job_key in llm_analyzed_keys:
+                    continue
                 proposals_num = parse_int_value(j.proposals)
                 if proposals_num is not None and proposals_num >= 50:
                     continue
                 jobs.append(j)
-            
-            # Sort by fit_score (best first)
-            opp_scores = {opp.job_key: opp.fit_score or 0 for opp in best_opps}
-            jobs.sort(key=lambda j: opp_scores.get(j.job_key, 0), reverse=True)
-            jobs = jobs[:limit]
+                if len(jobs) >= limit:
+                    break
         else:
             jobs = query.order_by(JobRaw.scraped_at.desc()).limit(limit).all()
 
@@ -341,7 +357,10 @@ async def decide_jobs(
         if keyword:
             query = query.filter(JobRaw.keyword == keyword)
 
-        job_rows = query.order_by(JobOpportunity.fit_score.desc()).limit(limit).all()
+        job_rows = query.order_by(
+            JobRaw.scraped_at.desc(),
+            JobOpportunity.fit_score.desc(),
+        ).limit(limit).all()
 
         if not job_rows:
             return DecisionResponse(timestamp=datetime.utcnow().isoformat())
@@ -526,6 +545,127 @@ async def get_profile():
 async def get_live_profile_snapshot():
     """Return latest dynamic profile sync payload (if available)."""
     return get_dynamic_profile_snapshot()
+
+
+@router.get("/profile/competitive-live", response_model=dict)
+async def get_live_competitive_profile_analysis():
+    """Live competitive benchmark from synced profile + ingested talent pool."""
+    db = get_db_session()
+    try:
+        profile = get_effective_profile()
+        dynamic = get_dynamic_profile_snapshot() or {}
+
+        profile_skills = {
+            str(s).strip().lower()
+            for s in [
+                *(profile.get("core_skills", []) or []),
+                *(profile.get("secondary_skills", []) or []),
+                *(profile.get("dynamic_keywords", []) or []),
+            ]
+            if str(s).strip()
+        }
+
+        talents = (
+            db.query(TalentRaw)
+            .order_by(TalentRaw.scraped_at.desc())
+            .limit(400)
+            .all()
+        )
+
+        competitors = []
+        all_rates: list[float] = []
+        all_ratings: list[float] = []
+        all_jobs: list[int] = []
+
+        for t in talents:
+            t_rate = _parse_hourly_value(getattr(t, "hourly_rate_value", None), _parse_hourly_value(t.hourly_rate, 0.0))
+            t_rating = float(t.rating or 0.0)
+            t_jobs = int(t.jobs_completed or 0)
+
+            if t_rate > 0:
+                all_rates.append(t_rate)
+            if t_rating > 0:
+                all_ratings.append(t_rating)
+            if t_jobs > 0:
+                all_jobs.append(t_jobs)
+
+            t_skills = {s.lower() for s in _parse_skill_values(t.skills)}
+            if not t_skills or not profile_skills:
+                overlap_ratio = 0.0
+                overlap_hits = 0
+            else:
+                overlap_hits = len(profile_skills & t_skills)
+                overlap_ratio = overlap_hits / max(1, len(profile_skills))
+
+            score = (
+                overlap_ratio * 60.0
+                + min(t_rating, 5.0) / 5.0 * 25.0
+                + min(t_jobs, 200) / 200.0 * 15.0
+            )
+
+            competitors.append(
+                {
+                    "name": t.name or "Unknown",
+                    "title": t.title or "",
+                    "hourly_rate": t.hourly_rate or (f"${int(t_rate)}/hr" if t_rate > 0 else ""),
+                    "rating": round(t_rating, 2),
+                    "jobs_completed": t_jobs,
+                    "skill_overlap": overlap_hits,
+                    "skill_overlap_ratio": round(overlap_ratio, 3),
+                    "competitive_score": round(score, 2),
+                }
+            )
+
+        competitors.sort(key=lambda x: x["competitive_score"], reverse=True)
+        top_competitors = competitors[:12]
+
+        user_hourly = _parse_hourly_value(profile.get("hourly_rate"), _parse_hourly_value(profile.get("hourly_range"), 0.0))
+        user_jobs = int(profile.get("total_upwork_jobs", 0) or 0)
+
+        median_rate = round(sum(all_rates) / len(all_rates), 2) if all_rates else 0.0
+        median_rating = round(sum(all_ratings) / len(all_ratings), 2) if all_ratings else 0.0
+        median_jobs = round(sum(all_jobs) / len(all_jobs), 1) if all_jobs else 0.0
+
+        high_fit_jobs = db.query(JobOpportunity).filter(JobOpportunity.fit_score >= 70).count()
+        hot_apply_jobs = db.query(JobOpportunity).filter(JobOpportunity.apply_now == True).count()
+
+        actions = []
+        if user_jobs < max(3, int(median_jobs)):
+            actions.append("Kısa ve hızlı tamamlanabilir 3-5 işe öncelik ver; social proof açığını kapat.")
+        if user_hourly > 0 and median_rate > 0 and user_hourly > median_rate * 1.25:
+            actions.append("Kazanç yerine itibar fazındasın: teklifleri bir süre pazar medianına yaklaştır.")
+        if hot_apply_jobs < 5:
+            actions.append("Pipeline dar: yeni keyword sync + ingest sonrası LLM batch analizi otomatik tetikle.")
+        if not actions:
+            actions.append("Profil-pazar uyumu sağlıklı; APPLY havuzunda hız/kalite optimizasyonuna odaklan.")
+
+        return {
+            "synced_at": dynamic.get("synced_at") or profile.get("dynamic_synced_at"),
+            "profile_live": {
+                "title": profile.get("title", ""),
+                "hourly_range": profile.get("hourly_range", ""),
+                "total_upwork_jobs": user_jobs,
+                "dynamic_keywords": profile.get("dynamic_keywords", []) or [],
+                "dynamic_keyword_count": len(profile.get("dynamic_keywords", []) or []),
+            },
+            "market_snapshot": {
+                "talent_scanned": len(talents),
+                "high_fit_jobs": int(high_fit_jobs),
+                "hot_apply_jobs": int(hot_apply_jobs),
+                "median_hourly_rate": median_rate,
+                "median_rating": median_rating,
+                "median_jobs_completed": median_jobs,
+            },
+            "benchmark": {
+                "experience_gap": round(median_jobs - user_jobs, 1),
+                "rate_gap": round(user_hourly - median_rate, 2) if user_hourly and median_rate else 0.0,
+                "readiness_score": round(min(100.0, (hot_apply_jobs * 12.0) + (len(profile_skills) * 1.2)), 1),
+            },
+            "top_competitors": top_competitors,
+            "priority_actions": actions,
+        }
+    finally:
+        db.close()
 
 
 @router.post("/profile/sync", response_model=ProfileSyncResponse)

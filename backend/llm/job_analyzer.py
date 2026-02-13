@@ -234,6 +234,62 @@ class JobAnalyzer:
             analysis.risk_flags.append(f"AVOID_KEYWORD: {', '.join(avoid_hits)}")
             analysis.composite_score = max(0.0, analysis.composite_score - 0.10)
 
+        # --- Hard SKIP: unavailable/closed jobs ---
+        unavailable_markers = [
+            "this job is no longer available",
+            "job is no longer available",
+            "job_availability: unavailable",
+            "not available",
+        ]
+        if any(marker in job_text for marker in unavailable_markers):
+            analysis.recommended_action = "SKIP"
+            analysis.composite_score = min(analysis.composite_score, 0.25)
+            analysis.risk_flags.append("HARD_RULE: job unavailable/closed")
+
+        # --- Staleness/intent penalties ---
+        posted_is_old = any(
+            hint in job_text
+            for hint in [
+                "posted: last month",
+                "posted last month",
+                "posted: 1 month",
+                "month ago",
+            ]
+        )
+        low_client_attention = any(
+            hint in job_text
+            for hint in [
+                "activity_last_viewed: last month",
+                "last viewed by client: last month",
+            ]
+        )
+
+        hire_rate = None
+        hire_match = _re.search(r"(?:client_hire_rate\s*:\s*|\b)(\d{1,3})\s*%\s*hire", job_text)
+        if hire_match:
+            try:
+                hire_rate = int(hire_match.group(1))
+            except Exception:
+                hire_rate = None
+
+        if posted_is_old:
+            analysis.composite_score = max(0.0, analysis.composite_score - 0.12)
+            analysis.risk_flags.append("STALE_SIGNAL: posted age is old (month-level)")
+            if analysis.recommended_action == "APPLY":
+                analysis.recommended_action = "WATCH"
+
+        if low_client_attention:
+            analysis.composite_score = max(0.0, analysis.composite_score - 0.08)
+            analysis.risk_flags.append("INTENT_SIGNAL: low recent client activity")
+            if analysis.recommended_action == "APPLY":
+                analysis.recommended_action = "WATCH"
+
+        if hire_rate is not None and hire_rate <= 20:
+            analysis.composite_score = max(0.0, analysis.composite_score - 0.07)
+            analysis.risk_flags.append(f"CLIENT_SIGNAL: low hire rate ({hire_rate}%)")
+            if analysis.recommended_action == "APPLY":
+                analysis.recommended_action = "WATCH"
+
         # --- Hard SKIP: budget < $10 with effort > 3h ---
         if budget_val > 0 and budget_val < 10 and analysis.estimated_effort_hours > 3:
             analysis.recommended_action = "SKIP"
@@ -263,6 +319,17 @@ class JobAnalyzer:
 
         # --- Early-stage strategy: prefer low-competition verified jobs ---
         if PROFILE.get("total_upwork_jobs", 0) < 5:
+            # Extra caution for new profiles: weak-client jobs should not be immediate APPLY.
+            if (
+                (not job.get("payment_verified"))
+                and (job.get("client_spend") or 0) <= 300
+                and (hire_rate is not None and hire_rate <= 20)
+                and analysis.recommended_action == "APPLY"
+            ):
+                analysis.recommended_action = "WATCH"
+                analysis.composite_score = max(0.0, analysis.composite_score - 0.10)
+                analysis.risk_flags.append("STRATEGY_GUARD: early-stage profile, low trust client")
+
             if proposals_num <= 10 and job.get("payment_verified") and skill_ratio >= 0.15:
                 analysis.composite_score = min(1.0, analysis.composite_score + 0.08)
                 analysis.risk_flags.append("STRATEGY: ideal early-stage job (low comp, verified, skill match)")

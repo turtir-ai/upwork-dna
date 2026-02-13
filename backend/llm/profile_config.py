@@ -19,13 +19,13 @@ from typing import Any
 
 PROFILE = {
     # ─── Identity ───────────────────────────────────────────────
-    "name": "Your Name",
+    "name": "Tuncer Timur",
     "title": "AI Automation Engineer | RAG, AI Agents & n8n Workflows | Python",
     "location": "Remote",
     "timezone": "UTC+3",
     "languages": ["English (Conversational)", "Turkish (Native)"],
     "availability": "30+ hrs/week",
-    "upwork_url": "https://www.upwork.com/freelancers/~your-profile-id",
+    "upwork_url": "https://www.upwork.com/freelancers/ttimur",
 
     # ─── Pricing ────────────────────────────────────────────────
     "hourly_rate": 35.0,
