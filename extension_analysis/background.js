@@ -7,6 +7,7 @@ const BACKEND_PROFILE_SYNC_ENDPOINTS = [
   "http://127.0.0.1:8000/v1/llm/profile/sync",
   "http://localhost:8000/v1/llm/profile/sync"
 ];
+const PROFILE_AUTO_SYNC_COOLDOWN_MS = 1000 * 60 * 30;
 
 // Import shared utilities
 function storageGet(key) {
@@ -518,6 +519,25 @@ async function getProfileSyncState() {
   return (await storageGet(PROFILE_SYNC_KEY)) || {};
 }
 
+function hashText(value) {
+  const text = String(value || "");
+  let hash = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    hash = (hash << 5) - hash + text.charCodeAt(i);
+    hash |= 0;
+  }
+  return String(hash);
+}
+
+function shouldAutoSyncProfile(state, nextHash) {
+  if (!state || !state.syncedAt) return true;
+  if (state.profileHash && state.profileHash !== nextHash) return true;
+
+  const syncedAt = Date.parse(state.syncedAt);
+  if (!Number.isFinite(syncedAt)) return true;
+  return Date.now() - syncedAt >= PROFILE_AUTO_SYNC_COOLDOWN_MS;
+}
+
 function sendMessageToTab(tabId, payload) {
   return new Promise((resolve) => {
     chrome.tabs.sendMessage(tabId, payload, (response) => {
@@ -606,6 +626,82 @@ async function handleSyncProfileFromActiveTab() {
   await setProfileSyncState(output);
 
   return { ok: true, ...output };
+}
+
+async function syncProfileFromContext(context, options = {}) {
+  const payload = {
+    upwork_url: context.upworkUrl || "",
+    headline: context.headline || "",
+    profile_text: context.profileText || ""
+  };
+
+  if (!payload.profile_text) {
+    return { ok: false, error: "Profile text missing for auto sync." };
+  }
+
+  const state = await getProfileSyncState();
+  const profileHash = hashText(payload.profile_text);
+  const force = Boolean(options.force);
+
+  if (!force && !shouldAutoSyncProfile(state, profileHash)) {
+    return { ok: true, skipped: true, reason: "fresh_sync_exists" };
+  }
+
+  const syncResult = await postProfileSync(payload);
+  if (!syncResult.ok) {
+    await setProfileSyncState({
+      status: "error",
+      message: syncResult.error,
+      sourceUrl: payload.upwork_url,
+      profileHash
+    });
+    return { ok: false, error: syncResult.error };
+  }
+
+  const output = {
+    status: "ok",
+    sourceUrl: payload.upwork_url,
+    headline: payload.headline,
+    keywordCount: (syncResult.data?.extracted_keywords || []).length,
+    syncedAt: syncResult.data?.synced_at || nowIso(),
+    endpoint: syncResult.endpoint,
+    profileHash,
+    lastProfileContext: {
+      upworkUrl: payload.upwork_url,
+      headline: payload.headline,
+      profileText: payload.profile_text
+    }
+  };
+  await setProfileSyncState(output);
+  return { ok: true, ...output };
+}
+
+async function handleProfileContextUpdated(message) {
+  const context = {
+    upworkUrl: message.upworkUrl || "",
+    headline: message.headline || "",
+    profileText: message.profileText || "",
+    skills: message.skills || []
+  };
+
+  const state = await getProfileSyncState();
+  await setProfileSyncState({
+    ...(state || {}),
+    lastProfileContext: context,
+    lastContextAt: nowIso(),
+    sourceUrl: context.upworkUrl || state.sourceUrl || ""
+  });
+
+  return syncProfileFromContext(context, { force: false });
+}
+
+async function ensureProfileSyncedBeforeRun() {
+  const state = await getProfileSyncState();
+  const context = state.lastProfileContext;
+  if (!context || !context.profileText) {
+    return { ok: true, skipped: true, reason: "no_profile_context" };
+  }
+  return syncProfileFromContext(context, { force: false });
 }
 
 function buildSummary(run) {
@@ -1314,6 +1410,8 @@ async function handleQueueStart(message) {
   const keywords = message.keywords || [];
   const options = message.options || {};
 
+  await ensureProfileSyncedBeforeRun();
+
   await QueueMgr.addKeywords(keywords, options);
   const queue = await QueueMgr.getQueue();
   queue.isRunning = true;
@@ -1480,6 +1578,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (type === "CLEAR_DATA") {
     handleClearData().then(sendResponse);
+    return true;
+  }
+
+  if (type === "PROFILE_CONTEXT_UPDATED") {
+    handleProfileContextUpdated(message).then(sendResponse);
     return true;
   }
 

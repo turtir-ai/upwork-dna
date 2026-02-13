@@ -2065,6 +2065,21 @@ async function scrapeByType(pageType, context = {}) {
 }
 
 async function startScrapeFlow() {
+  const isProfilePage = /\/freelancers\//.test(window.location.href) || /\/profile\//.test(window.location.href);
+  if (isProfilePage) {
+    const profile = extractProfileContext();
+    if (profile.ok) {
+      chrome.runtime.sendMessage({
+        type: "PROFILE_CONTEXT_UPDATED",
+        upworkUrl: profile.upworkUrl,
+        headline: profile.headline || "",
+        skills: profile.skills || [],
+        profileText: profile.profileText || ""
+      });
+    }
+    return;
+  }
+
   const pageType = detectPageType();
   if (!pageType) {
     return;
