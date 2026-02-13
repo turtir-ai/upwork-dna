@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import asyncio
 from datetime import datetime
 from typing import Optional
 
@@ -22,7 +23,8 @@ from llm.decision_engine import DecisionEngine, DecisionBatch
 from llm.proposal_writer import ProposalWriter
 from llm.keyword_discoverer import KeywordDiscoverer
 from llm.keyword_strategy import KeywordStrategyAdvisor
-from llm.profile_config import PROFILE, get_profile_summary
+from llm.profile_config import PROFILE, get_profile_summary, get_effective_profile, get_dynamic_profile_snapshot
+from llm.profile_sync import sync_profile_from_upwork, save_dynamic_profile, build_profile_payload_from_text
 from llm.notifier import get_notifier
 
 logger = logging.getLogger("upwork-dna.llm.api")
@@ -152,6 +154,22 @@ class KeywordStrategyResponse(BaseModel):
     add: list[dict] = []
     overall_strategy: str = ""
     llm_error: str = ""
+
+
+class ProfileSyncRequest(BaseModel):
+    upwork_url: str = ""
+    profile_text: str = ""
+    headline: str = ""
+
+
+class ProfileSyncResponse(BaseModel):
+    status: str = "ok"
+    synced_at: str = ""
+    upwork_url: str = ""
+    extracted_keywords: list[str] = []
+    detected_skills: list[str] = []
+    headline: str = ""
+    overview: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -486,21 +504,68 @@ async def discover_keywords():
 @router.get("/profile", response_model=ProfileResponse)
 async def get_profile():
     """Get the freelancer profile configuration used for all LLM analyses."""
+    effective = get_effective_profile()
     return ProfileResponse(
-        name=PROFILE.get("name", ""),
-        title=PROFILE.get("title", ""),
-        hourly_rate=PROFILE.get("hourly_rate", 0),
-        hourly_range=PROFILE.get("hourly_range", ""),
-        core_skills=PROFILE.get("core_skills", []),
-        secondary_skills=PROFILE.get("secondary_skills", []),
-        service_lines=PROFILE.get("service_lines", []),
-        portfolio_projects=PROFILE.get("portfolio_projects", []),
-        ideal_job_keywords=PROFILE.get("ideal_job_keywords", []),
-        avoid_keywords=PROFILE.get("avoid_keywords", []),
-        strategy=PROFILE.get("strategy", {}),
-        total_upwork_jobs=PROFILE.get("total_upwork_jobs", 0),
+        name=effective.get("name", ""),
+        title=effective.get("title", ""),
+        hourly_rate=effective.get("hourly_rate", 0),
+        hourly_range=effective.get("hourly_range", ""),
+        core_skills=effective.get("core_skills", []),
+        secondary_skills=effective.get("secondary_skills", []),
+        service_lines=effective.get("service_lines", []),
+        portfolio_projects=effective.get("portfolio_projects", []),
+        ideal_job_keywords=effective.get("ideal_job_keywords", []),
+        avoid_keywords=effective.get("avoid_keywords", []),
+        strategy=effective.get("strategy", {}),
+        total_upwork_jobs=effective.get("total_upwork_jobs", 0),
         profile_summary=get_profile_summary(),
     )
+
+
+@router.get("/profile/live", response_model=dict)
+async def get_live_profile_snapshot():
+    """Return latest dynamic profile sync payload (if available)."""
+    return get_dynamic_profile_snapshot()
+
+
+@router.post("/profile/sync", response_model=ProfileSyncResponse)
+async def sync_profile(payload: ProfileSyncRequest):
+    """Fetch public Upwork profile and update dynamic keyword model."""
+    upwork_url = payload.upwork_url.strip() or PROFILE.get("upwork_url", "")
+    manual_text = payload.profile_text.strip()
+
+    if not upwork_url and not manual_text:
+        raise HTTPException(status_code=400, detail="Missing upwork_url or profile_text")
+
+    try:
+        if manual_text:
+            synced = build_profile_payload_from_text(
+                profile_text=manual_text,
+                upwork_url=upwork_url,
+                headline=payload.headline,
+            )
+            await asyncio.to_thread(save_dynamic_profile, synced)
+        else:
+            synced = await asyncio.to_thread(sync_profile_from_upwork, upwork_url)
+
+        return ProfileSyncResponse(
+            status="ok",
+            synced_at=synced.get("synced_at", ""),
+            upwork_url=synced.get("upwork_url", ""),
+            extracted_keywords=synced.get("extracted_keywords", []),
+            detected_skills=synced.get("detected_skills", []),
+            headline=synced.get("headline", ""),
+            overview=synced.get("overview", ""),
+        )
+    except Exception as e:
+        logger.error(f"Profile sync failed: {e}")
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Profile sync failed: {e}. "
+                "If Upwork blocks server-side fetch (403), call this endpoint with profile_text to sync dynamically."
+            ),
+        )
 
 
 @router.get("/keyword-fit", response_model=list[KeywordFitResponse])

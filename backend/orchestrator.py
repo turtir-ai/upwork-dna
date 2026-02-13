@@ -274,8 +274,26 @@ def score_priority(opportunity_score: float) -> str:
 
 def compute_fit_score(text: str) -> float:
     normalized = text.lower()
+    weights = dict(FIT_TERM_WEIGHTS)
+
+    # Dynamic keyword augmentation from synced Upwork profile
+    try:
+        from llm.profile_config import get_skills_for_matching, get_ideal_keywords
+
+        for skill in get_skills_for_matching():
+            term = str(skill).strip().lower()
+            if term and term not in weights:
+                weights[term] = 10
+        for keyword in get_ideal_keywords():
+            term = str(keyword).strip().lower()
+            if term and term not in weights:
+                weights[term] = 8
+    except Exception:
+        # Keep static weights as fallback.
+        pass
+
     raw_score = 0.0
-    for term, weight in FIT_TERM_WEIGHTS.items():
+    for term, weight in weights.items():
         if term in normalized:
             raw_score += weight
     # Normalize: matching ~7 core skills (7*14=98) should be ~100%.

@@ -52,6 +52,9 @@ analist/data.zip
 outputs/
 upwork_dna/
 
+# Runtime profile sync snapshot
+backend/data/profile_dynamic.json
+
 # Workspace artifacts
 .claude/
 extension_analysis.zip

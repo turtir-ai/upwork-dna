@@ -11,6 +11,12 @@ This profile is injected into:
 - Decision engine (priority ranking)
 """
 
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
 PROFILE = {
     # ─── Identity ───────────────────────────────────────────────
     "name": "Your Name",
@@ -134,11 +140,53 @@ PROFILE = {
 }
 
 
+_DYNAMIC_PROFILE_PATH = Path(__file__).resolve().parent.parent / "data" / "profile_dynamic.json"
+
+
+def _load_dynamic_profile() -> dict[str, Any]:
+    try:
+        if not _DYNAMIC_PROFILE_PATH.exists():
+            return {}
+        raw = _DYNAMIC_PROFILE_PATH.read_text(encoding="utf-8")
+        payload = json.loads(raw)
+        if isinstance(payload, dict):
+            return payload
+    except Exception:
+        return {}
+    return {}
+
+
+def get_effective_profile() -> dict[str, Any]:
+    """
+    Merge static profile with latest dynamic sync payload.
+    Dynamic sync currently augments keyword/skill matching fields.
+    """
+    profile = dict(PROFILE)
+    dynamic = _load_dynamic_profile()
+    extracted_keywords = dynamic.get("extracted_keywords", []) or []
+    detected_skills = dynamic.get("detected_skills", []) or []
+
+    static_ideal = profile.get("ideal_job_keywords", []) or []
+    profile["ideal_job_keywords"] = list(dict.fromkeys([*static_ideal, *extracted_keywords]))
+
+    static_secondary = profile.get("secondary_skills", []) or []
+    profile["secondary_skills"] = list(dict.fromkeys([*static_secondary, *detected_skills]))
+
+    if dynamic.get("headline"):
+        profile["title"] = dynamic["headline"]
+    if dynamic.get("upwork_url"):
+        profile["upwork_url"] = dynamic["upwork_url"]
+
+    profile["dynamic_synced_at"] = dynamic.get("synced_at")
+    profile["dynamic_keywords"] = extracted_keywords
+    return profile
+
+
 # ─── Helper: Format profile for prompts ───────────────────────
 
 def get_profile_summary() -> str:
     """Compact profile text for injection into LLM prompts."""
-    p = PROFILE
+    p = get_effective_profile()
     skills_str = ", ".join(p["core_skills"][:12])
     secondary_str = ", ".join(p["secondary_skills"][:8])
     portfolio_str = "\n".join(f"  - {proj}" for proj in p["portfolio_projects"])
@@ -169,14 +217,20 @@ def get_profile_summary() -> str:
 
 def get_skills_for_matching() -> list[str]:
     """All skills flattened for keyword matching."""
-    return PROFILE["core_skills"] + PROFILE["secondary_skills"]
+    p = get_effective_profile()
+    return (p.get("core_skills", []) or []) + (p.get("secondary_skills", []) or [])
 
 
 def get_ideal_keywords() -> list[str]:
     """Keywords that signal a good job match."""
-    return PROFILE["ideal_job_keywords"]
+    return get_effective_profile().get("ideal_job_keywords", []) or []
 
 
 def get_avoid_keywords() -> list[str]:
     """Keywords that signal poor fit."""
-    return PROFILE["avoid_keywords"]
+    return get_effective_profile().get("avoid_keywords", []) or []
+
+
+def get_dynamic_profile_snapshot() -> dict[str, Any]:
+    """Return latest synced dynamic profile payload (if available)."""
+    return _load_dynamic_profile()
