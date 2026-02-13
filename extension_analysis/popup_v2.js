@@ -17,6 +17,8 @@ const queuePauseBtn = document.getElementById('queue-pause');
 const queueResumeBtn = document.getElementById('queue-resume');
 const queueStopBtn = document.getElementById('queue-stop');
 const queueExportAllBtn = document.getElementById('queue-export-all');
+const syncProfileBtn = document.getElementById('sync-profile');
+const profileSyncStatusEl = document.getElementById('profile-sync-status');
 
 // Queue display elements
 const queueTotalEl = document.getElementById('queue-total');
@@ -164,6 +166,39 @@ async function exportAllQueue() {
   setStatus('Exporting all completed runs...');
   // TODO: Implement export all functionality
   setStatus('Export feature coming soon!');
+}
+
+async function syncProfileFromCurrentTab() {
+  setStatus('Syncing profile from active Upwork tab...');
+  const response = await sendMessage({ type: 'SYNC_PROFILE_FROM_ACTIVE_TAB' });
+
+  if (!response?.ok) {
+    setStatus(`Profile sync failed: ${response?.error || 'unknown error'}`);
+    await refreshProfileSyncStatus();
+    return;
+  }
+
+  setStatus(`Profile synced (${response.keywordCount || 0} keywords).`);
+  await refreshProfileSyncStatus();
+}
+
+function renderProfileSyncStatus(state) {
+  if (!profileSyncStatusEl) return;
+  if (!state || !state.updatedAt) {
+    profileSyncStatusEl.textContent = 'Profile sync: not started';
+    return;
+  }
+
+  const badge = state.status === 'ok' ? '✅' : '⚠️';
+  const source = state.sourceUrl || 'n/a';
+  const when = state.syncedAt || state.updatedAt;
+  profileSyncStatusEl.textContent = `${badge} Profile sync • ${when} • ${source}`;
+}
+
+async function refreshProfileSyncStatus() {
+  const response = await sendMessage({ type: 'GET_PROFILE_SYNC_STATUS' });
+  if (!response?.ok) return;
+  renderProfileSyncStatus(response.state || {});
 }
 
 // ===== QUEUE DISPLAY =====
@@ -388,6 +423,9 @@ queuePauseBtn.addEventListener('click', pauseQueue);
 queueResumeBtn.addEventListener('click', resumeQueue);
 queueStopBtn.addEventListener('click', stopQueue);
 queueExportAllBtn.addEventListener('click', exportAllQueue);
+if (syncProfileBtn) {
+  syncProfileBtn.addEventListener('click', syncProfileFromCurrentTab);
+}
 
 startButton.addEventListener('click', startSingleRun);
 stopButton.addEventListener('click', stopSingleRun);
@@ -399,6 +437,7 @@ clearButton.addEventListener('click', clearData);
 function init() {
   updateStatus();
   updateQueueDisplay();
+  refreshProfileSyncStatus();
 
   // Update every 2 seconds
   statusUpdateInterval = setInterval(() => {

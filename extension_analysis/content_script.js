@@ -341,6 +341,50 @@ function isJobDetailRoute(url) {
   return false;
 }
 
+function extractProfileContext() {
+  const isProfilePage = /\/freelancers\//.test(window.location.href) || /\/profile\//.test(window.location.href);
+  if (!isProfilePage) {
+    return { ok: false, error: "Open an Upwork freelancer profile page first." };
+  }
+
+  const headline = getText(
+    document.querySelector(
+      "[data-qa='freelancer-profile-title'], [data-qa='title'], h1, h2"
+    )
+  );
+
+  const overview = getText(
+    document.querySelector(
+      "[data-qa='overview'], [data-qa='freelancer-profile-overview'], section p"
+    )
+  );
+
+  const skillNodes = Array.from(
+    document.querySelectorAll(
+      "[data-qa='skill-name'], [data-qa='skills'] span, a[href*='/skills/'], .air3-token"
+    )
+  );
+  const skills = [...new Set(skillNodes.map((el) => getText(el)).filter(Boolean))].slice(0, 40);
+
+  const fallbackText = (document.body?.innerText || "").replace(/\s+/g, " ").trim().slice(0, 6000);
+  const profileText = [headline, overview, skills.join(" "), fallbackText]
+    .filter(Boolean)
+    .join("\n\n")
+    .trim();
+
+  if (!profileText) {
+    return { ok: false, error: "Could not extract profile text from this page." };
+  }
+
+  return {
+    ok: true,
+    upworkUrl: window.location.href,
+    headline,
+    skills,
+    profileText
+  };
+}
+
 function isTalentDetailRoute(url) {
   if (!url) {
     return false;
@@ -2140,7 +2184,16 @@ async function startScrapeFlow() {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (!message || message.type !== "FETCH_PROJECT_DETAIL") {
+  if (!message) {
+    return false;
+  }
+
+  if (message.type === "EXTRACT_PROFILE_CONTEXT") {
+    sendResponse(extractProfileContext());
+    return true;
+  }
+
+  if (message.type !== "FETCH_PROJECT_DETAIL") {
     return false;
   }
 

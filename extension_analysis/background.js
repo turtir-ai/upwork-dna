@@ -1,6 +1,12 @@
 const STATE_KEY = "upwork_scraper_state";
 const QUEUE_KEY = "upwork_scraper_queue";
 const QUEUE_STATS_KEY = "upwork_scraper_queue_stats";
+const PROFILE_SYNC_KEY = "upwork_profile_sync_state";
+
+const BACKEND_PROFILE_SYNC_ENDPOINTS = [
+  "http://127.0.0.1:8000/v1/llm/profile/sync",
+  "http://localhost:8000/v1/llm/profile/sync"
+];
 
 // Import shared utilities
 function storageGet(key) {
@@ -496,6 +502,110 @@ async function getState() {
 
 async function setState(state) {
   await storageSet({ [STATE_KEY]: state });
+}
+
+async function setProfileSyncState(payload) {
+  await storageSet({
+    [PROFILE_SYNC_KEY]: {
+      ...(await storageGet(PROFILE_SYNC_KEY) || {}),
+      ...payload,
+      updatedAt: nowIso()
+    }
+  });
+}
+
+async function getProfileSyncState() {
+  return (await storageGet(PROFILE_SYNC_KEY)) || {};
+}
+
+function sendMessageToTab(tabId, payload) {
+  return new Promise((resolve) => {
+    chrome.tabs.sendMessage(tabId, payload, (response) => {
+      if (chrome.runtime.lastError) {
+        resolve({ ok: false, error: chrome.runtime.lastError.message });
+        return;
+      }
+      resolve(response || { ok: false, error: "No response from tab." });
+    });
+  });
+}
+
+function getActiveTab() {
+  return new Promise((resolve) => {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      resolve(tabs && tabs.length ? tabs[0] : null);
+    });
+  });
+}
+
+async function postProfileSync(payload) {
+  let lastError = "";
+
+  for (const endpoint of BACKEND_PROFILE_SYNC_ENDPOINTS) {
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        lastError = data?.detail || `HTTP ${response.status}`;
+        continue;
+      }
+
+      return { ok: true, endpoint, data };
+    } catch (error) {
+      lastError = error?.message || "Network error";
+    }
+  }
+
+  return { ok: false, error: lastError || "Profile sync failed" };
+}
+
+async function handleSyncProfileFromActiveTab() {
+  const tab = await getActiveTab();
+  if (!tab || !tab.id || !tab.url) {
+    return { ok: false, error: "No active tab found." };
+  }
+
+  if (!tab.url.includes("upwork.com/freelancers/") && !tab.url.includes("upwork.com/profile/")) {
+    return { ok: false, error: "Open your Upwork freelancer profile tab first." };
+  }
+
+  const extracted = await sendMessageToTab(tab.id, { type: "EXTRACT_PROFILE_CONTEXT" });
+  if (!extracted.ok) {
+    return { ok: false, error: extracted.error || "Profile extraction failed." };
+  }
+
+  const payload = {
+    upwork_url: extracted.upworkUrl || tab.url,
+    headline: extracted.headline || "",
+    profile_text: extracted.profileText || ""
+  };
+
+  const syncResult = await postProfileSync(payload);
+  if (!syncResult.ok) {
+    await setProfileSyncState({
+      status: "error",
+      message: syncResult.error,
+      sourceUrl: payload.upwork_url
+    });
+    return { ok: false, error: syncResult.error };
+  }
+
+  const output = {
+    status: "ok",
+    sourceUrl: payload.upwork_url,
+    headline: payload.headline,
+    keywordCount: (syncResult.data?.extracted_keywords || []).length,
+    syncedAt: syncResult.data?.synced_at || nowIso(),
+    endpoint: syncResult.endpoint
+  };
+  await setProfileSyncState(output);
+
+  return { ok: true, ...output };
 }
 
 function buildSummary(run) {
@@ -1370,6 +1480,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (type === "CLEAR_DATA") {
     handleClearData().then(sendResponse);
+    return true;
+  }
+
+  if (type === "SYNC_PROFILE_FROM_ACTIVE_TAB") {
+    handleSyncProfileFromActiveTab().then(sendResponse);
+    return true;
+  }
+
+  if (type === "GET_PROFILE_SYNC_STATUS") {
+    getProfileSyncState().then((state) => sendResponse({ ok: true, state }));
     return true;
   }
 
