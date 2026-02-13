@@ -8,6 +8,7 @@ const BACKEND_PROFILE_SYNC_ENDPOINTS = [
   "http://localhost:8000/v1/llm/profile/sync"
 ];
 const PROFILE_AUTO_SYNC_COOLDOWN_MS = 1000 * 60 * 30;
+const DEFAULT_UPWORK_PROFILE_URL = "https://www.upwork.com/freelancers/ttimur";
 
 // Import shared utilities
 function storageGet(key) {
@@ -698,10 +699,99 @@ async function handleProfileContextUpdated(message) {
 async function ensureProfileSyncedBeforeRun() {
   const state = await getProfileSyncState();
   const context = state.lastProfileContext;
-  if (!context || !context.profileText) {
-    return { ok: true, skipped: true, reason: "no_profile_context" };
+  if (context && context.profileText) {
+    return syncProfileFromContext(context, { force: false });
   }
-  return syncProfileFromContext(context, { force: false });
+
+  const bootstrapUrl = state.sourceUrl || DEFAULT_UPWORK_PROFILE_URL;
+  try {
+    const bootstrapContext = await bootstrapProfileContextFromTab(bootstrapUrl);
+    if (!bootstrapContext.ok) {
+      await setProfileSyncState({
+        status: "warning",
+        message: bootstrapContext.error || "Profile bootstrap failed",
+        sourceUrl: bootstrapUrl
+      });
+      return { ok: true, skipped: true, reason: "bootstrap_failed" };
+    }
+    return syncProfileFromContext(bootstrapContext.context, { force: true });
+  } catch (error) {
+    await setProfileSyncState({
+      status: "warning",
+      message: error?.message || "Profile bootstrap exception",
+      sourceUrl: bootstrapUrl
+    });
+    return { ok: true, skipped: true, reason: "bootstrap_exception" };
+  }
+}
+
+function createTab(url, active = false) {
+  return new Promise((resolve) => {
+    chrome.tabs.create({ url, active }, (tab) => resolve(tab || null));
+  });
+}
+
+function removeTab(tabId) {
+  return new Promise((resolve) => {
+    chrome.tabs.remove(tabId, () => resolve());
+  });
+}
+
+function waitForTabComplete(tabId, timeoutMs = 20000) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (ok) => {
+      if (done) return;
+      done = true;
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      clearTimeout(timeoutId);
+      resolve(ok);
+    };
+
+    const onUpdated = (updatedTabId, changeInfo) => {
+      if (updatedTabId !== tabId) return;
+      if (changeInfo.status === "complete") {
+        finish(true);
+      }
+    };
+
+    const timeoutId = setTimeout(() => finish(false), timeoutMs);
+    chrome.tabs.onUpdated.addListener(onUpdated);
+  });
+}
+
+async function extractProfileContextFromTab(tabId, fallbackUrl) {
+  for (let i = 0; i < 5; i += 1) {
+    const extracted = await sendMessageToTab(tabId, { type: "EXTRACT_PROFILE_CONTEXT" });
+    if (extracted.ok) {
+      return {
+        ok: true,
+        context: {
+          upworkUrl: extracted.upworkUrl || fallbackUrl,
+          headline: extracted.headline || "",
+          profileText: extracted.profileText || "",
+          skills: extracted.skills || []
+        }
+      };
+    }
+    await delay(800);
+  }
+  return { ok: false, error: "Could not read profile page context." };
+}
+
+async function bootstrapProfileContextFromTab(profileUrl) {
+  const tab = await createTab(profileUrl, false);
+  if (!tab || !tab.id) {
+    return { ok: false, error: "Could not open profile tab for sync." };
+  }
+
+  try {
+    await waitForTabComplete(tab.id, 20000);
+    await delay(1200);
+    return await extractProfileContextFromTab(tab.id, profileUrl);
+  } finally {
+    await removeTab(tab.id);
+  }
 }
 
 function buildSummary(run) {
