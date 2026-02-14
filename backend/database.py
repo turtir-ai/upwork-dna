@@ -154,6 +154,7 @@ class JobRaw(Base):
     payment_verified = Column(Boolean, default=False)
     proposals = Column(String)
     skills = Column(Text)
+    posted_at = Column(DateTime, nullable=True)  # Parsed from "Posted 2 hours ago" etc.
     source_file = Column(String)
     scraped_at = Column(DateTime, default=datetime.utcnow, index=True)
 

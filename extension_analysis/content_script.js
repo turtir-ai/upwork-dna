@@ -416,6 +416,21 @@ function extractProfileContext() {
     .join("\n\n")
     .trim();
 
+  const profileTextLower = profileText.toLowerCase();
+  const looksLikeLoginWall =
+    profileTextLower.includes("profile is only available to upwork customers") ||
+    profileTextLower.includes("please login or sign up") ||
+    profileTextLower.includes("please log in") ||
+    profileTextLower.includes("log in sign up") ||
+    profileTextLower.includes("login or sign up to view their profile");
+
+  if (looksLikeLoginWall) {
+    return {
+      ok: false,
+      error: "Upwork profile is behind a login wall. Please log in to Upwork, open your freelancer profile page, then re-run profile sync."
+    };
+  }
+
   if (!profileText) {
     return { ok: false, error: "Could not extract profile text from this page." };
   }

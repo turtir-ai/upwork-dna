@@ -11,7 +11,7 @@ from dataclasses import dataclass, asdict
 from typing import Optional
 
 from .client import LLMClient, LLMError
-from .prompts import KEYWORD_DISCOVERY_SYSTEM, KEYWORD_DISCOVERY_PROMPT
+from .prompts import get_keyword_discovery_system, get_keyword_discovery_prompt
 
 logger = logging.getLogger("upwork-dna.llm.keywords")
 
@@ -60,13 +60,13 @@ class KeywordDiscoverer:
                 for m in current_metrics
             ]
 
-            prompt = KEYWORD_DISCOVERY_PROMPT.format(
+            prompt = get_keyword_discovery_prompt().format(
                 keyword_metrics_json=json.dumps(compact, indent=2)
             )
 
             data = await self.client.chat_json(
                 prompt,
-                system=KEYWORD_DISCOVERY_SYSTEM,
+                system=get_keyword_discovery_system(),
                 temperature=0.6,  # More creative for discovery
             )
 

@@ -12,7 +12,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional
 
 from .client import LLMClient, LLMError
-from .prompts import KEYWORD_STRATEGY_SYSTEM, KEYWORD_STRATEGY_PROMPT
+from .prompts import get_keyword_strategy_system, get_keyword_strategy_prompt
 from .profile_config import PROFILE, get_ideal_keywords, get_avoid_keywords
 
 logger = logging.getLogger("upwork-dna.llm.keyword_strategy")
@@ -148,13 +148,13 @@ class KeywordStrategyAdvisor:
                 for m in current_metrics
             ]
 
-            prompt = KEYWORD_STRATEGY_PROMPT.format(
+            prompt = get_keyword_strategy_prompt().format(
                 keyword_metrics_json=json.dumps(compact, indent=2)
             )
 
             data = await self.client.chat_json(
                 prompt,
-                system=KEYWORD_STRATEGY_SYSTEM,
+                system=get_keyword_strategy_system(),
                 temperature=0.3,
             )
 

@@ -25,20 +25,24 @@ API = os.getenv("UPWORK_ORCHESTRATOR_API", "http://127.0.0.1:8000")
 # API helpers
 # ═══════════════════════════════════════════════════════════════
 
+_api_errors: list[str] = []  # Collect API errors for display
+
 @st.cache_data(ttl=25)
-def get(ep, default=None, timeout=5):
+def get(ep, default=None, timeout=8):
     try:
         with urlopen(Request(f"{API}{ep}", headers={"Accept": "application/json"}), timeout=timeout) as r:
             return json.loads(r.read())
-    except Exception:
+    except Exception as e:
+        _api_errors.append(f"GET {ep}: {e}")
         return default if default is not None else {}
 
 
-def get_live(ep, default=None, timeout=5):
+def get_live(ep, default=None, timeout=10):
     try:
         with urlopen(Request(f"{API}{ep}", headers={"Accept": "application/json"}), timeout=timeout) as r:
             return json.loads(r.read())
-    except Exception:
+    except Exception as e:
+        _api_errors.append(f"GET {ep}: {e}")
         return default if default is not None else {}
 
 def post(ep, timeout=120):
@@ -704,8 +708,22 @@ def tab_profile(data):
     kw_fit = data.get("kw_fit", [])
 
     if not profile.get("name"):
-        st.warning("Profil yüklenemedi.")
+        st.warning("Profil yüklenemedi. Backend çalışıyor mu?")
         return
+
+    # Dynamic profile sync status
+    dyn_synced = profile.get("dynamic_synced_at")
+    dyn_kws = profile.get("dynamic_keywords", [])
+    sync_col1, sync_col2 = st.columns([2, 1])
+    with sync_col1:
+        if dyn_synced:
+            st.success(f"✅ Dinamik profil sync: {str(dyn_synced)[:19]} | {len(dyn_kws)} keyword")
+        else:
+            st.warning("⚠️ Henüz dinamik profil sync yapılmadı — Extension üzerinden profil kazıyın")
+    with sync_col2:
+        if st.button("🔄 Profili Yenile", key="refresh_profile"):
+            st.cache_data.clear()
+            st.rerun()
 
     # Profile card
     st.markdown(
@@ -1156,6 +1174,13 @@ def main():
 
     data = load()
     sidebar(data)
+
+    # Show API connection errors if any
+    if _api_errors:
+        with st.expander(f"⚠️ Backend bağlantı sorunları ({len(_api_errors)})", expanded=False):
+            for err in _api_errors:
+                st.error(err)
+        _api_errors.clear()
 
     # Top metrics
     s = data["summary"]

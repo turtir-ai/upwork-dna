@@ -12,7 +12,7 @@ from typing import Optional
 
 from .client import LLMClient, LLMError
 from .job_analyzer import JobAnalysis
-from .prompts import PROPOSAL_SYSTEM, PROPOSAL_PROMPT
+from .prompts import get_proposal_system, get_proposal_prompt
 
 logger = logging.getLogger("upwork-dna.llm.proposal")
 
@@ -90,7 +90,7 @@ class ProposalWriter:
                 "recommended_bid": analysis.recommended_bid,
             }
 
-            prompt = PROPOSAL_PROMPT.format(
+            prompt = get_proposal_prompt().format(
                 analysis_json=json.dumps(analysis_summary, indent=2),
                 title=title,
                 description=(job.get("description", "") or "")[:3000],
@@ -98,7 +98,7 @@ class ProposalWriter:
 
             data = await self.client.chat_json(
                 prompt,
-                system=PROPOSAL_SYSTEM,
+                system=get_proposal_system(),
                 temperature=0.5,  # Slightly creative for proposals
                 max_tokens=2048,
             )

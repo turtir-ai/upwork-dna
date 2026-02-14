@@ -301,7 +301,7 @@ def compute_fit_score(text: str) -> float:
     return round(clamp((raw_score / 100.0) * 100.0), 2)
 
 
-def compute_freshness_score(proposals_str: str, scraped_at: datetime = None) -> float:
+def compute_freshness_score(proposals_str: str, scraped_at: datetime = None, posted_at: datetime = None) -> float:
     """0-100 freshness score. Higher = fresher/more worth applying."""
     score = 100.0
     proposals = parse_int_value(proposals_str)
@@ -318,8 +318,25 @@ def compute_freshness_score(proposals_str: str, scraped_at: datetime = None) -> 
         elif proposals <= 5:
             score += 0  # Already at 100
 
-    # Scrape age penalty
-    if scraped_at:
+    # Posted-at age penalty (best signal for actual job age)
+    if posted_at:
+        try:
+            if isinstance(posted_at, str):
+                posted_at = datetime.fromisoformat(posted_at.replace("Z", "+00:00").replace("+00:00", ""))
+            posted_age_hours = (datetime.utcnow() - posted_at).total_seconds() / 3600
+            if posted_age_hours > 336:  # > 14 days
+                score -= 45.0
+            elif posted_age_hours > 168:  # > 7 days
+                score -= 25.0
+            elif posted_age_hours > 72:  # > 3 days
+                score -= 10.0
+            elif posted_age_hours <= 24:  # < 1 day — very fresh!
+                score += 5.0
+        except Exception:
+            pass
+
+    # Scrape age penalty (fallback — less reliable than posted_at)
+    elif scraped_at:
         try:
             if isinstance(scraped_at, str):
                 scraped_at = datetime.fromisoformat(scraped_at.replace("Z", "+00:00").replace("+00:00", ""))
@@ -681,6 +698,7 @@ class OrchestratorService:
             freshness = compute_freshness_score(
                 proposals_str=job.proposals or "0",
                 scraped_at=job.scraped_at,
+                posted_at=getattr(job, "posted_at", None),
             )
 
             # ─── Profile-aware apply_now (stricter) ──────────
@@ -1186,6 +1204,9 @@ class OrchestratorService:
         scraped_at = self._parse_datetime(
             pick_first(row, ["scraped_at", "timestamp", "created_at"], None)
         )
+        posted_at = self._parse_datetime(
+            pick_first(row, ["detail_posted", "posted", "posted_date"], None)
+        )
 
         return {
             "job_key": derive_job_key(url, title, record_keyword),
@@ -1200,6 +1221,7 @@ class OrchestratorService:
             "proposals": normalize_text(proposals) if proposals is not None else None,
             "skills": skills,
             "scraped_at": scraped_at,
+            "posted_at": posted_at,
         }
 
     def _normalize_talent_row(self, row: Dict[str, Any], keyword: str) -> Dict[str, Any]:
@@ -1303,6 +1325,8 @@ class OrchestratorService:
             changed = self._set_if_changed(entry, "proposals", row["proposals"]) or changed
             changed = self._set_if_changed(entry, "skills", row["skills"]) or changed
             changed = self._set_if_changed(entry, "source_file", source_file) or changed
+            if row.get("posted_at"):
+                changed = self._set_if_changed(entry, "posted_at", row["posted_at"]) or changed
 
             new_scraped_at = row["scraped_at"] or entry.scraped_at or datetime.utcnow()
             if entry.scraped_at is None or (new_scraped_at and new_scraped_at > entry.scraped_at):
@@ -1417,6 +1441,8 @@ class OrchestratorService:
         text = str(value).strip()
         if not text:
             return None
+
+        # Try ISO format first
         for candidate in (
             text,
             text.replace("Z", "+00:00"),
@@ -1425,6 +1451,35 @@ class OrchestratorService:
                 return datetime.fromisoformat(candidate)
             except ValueError:
                 continue
+
+        # Parse Upwork's relative date strings ("Posted 2 hours ago", "3 days ago", etc.)
+        text_lower = text.lower()
+        relative_match = re.search(
+            r"(\d+)\s*(minute|hour|day|week|month)s?\s*ago",
+            text_lower,
+        )
+        if relative_match:
+            amount = int(relative_match.group(1))
+            unit = relative_match.group(2)
+            delta_map = {
+                "minute": timedelta(minutes=amount),
+                "hour": timedelta(hours=amount),
+                "day": timedelta(days=amount),
+                "week": timedelta(weeks=amount),
+                "month": timedelta(days=amount * 30),
+            }
+            delta = delta_map.get(unit)
+            if delta:
+                return datetime.utcnow() - delta
+
+        # Handle "yesterday", "last week/month" etc.
+        if "yesterday" in text_lower:
+            return datetime.utcnow() - timedelta(days=1)
+        if "last week" in text_lower:
+            return datetime.utcnow() - timedelta(weeks=1)
+        if "last month" in text_lower:
+            return datetime.utcnow() - timedelta(days=30)
+
         return None
 
     def _parse_float(self, value: Any) -> Optional[float]:

@@ -11,6 +11,7 @@ const MAX_API_KEYWORD_INJECTION = 5;
 const API_KEYWORD_SYNC_COOLDOWN_MS = 15000;
 const QUEUE_PROCESSOR_TICK_MS = 8000;
 const LIST_NAV_DELAY_RANGE = { min: 2500, max: 5000 };
+const TARGET_SWITCH_DELAY_RANGE = { min: 2000, max: 4000 };
 const BLOCK_RETRY_DELAY_RANGE = { min: 90000, max: 180000 };
 const BLOCK_MAX_RETRIES = 2;
 const RATE_LIMIT_COOLDOWN_MS = 3 * 60 * 1000;
@@ -477,6 +478,38 @@ const StorageMgr = {
 // ===== AUTO QUEUE PROCESSOR =====
 let queueProcessorInterval = null;
 
+async function refillQueueForContinuousCycle(queue) {
+  if (!queue || !queue.isRunning || queue.isPaused) {
+    return { changed: false, reason: "queue_inactive" };
+  }
+
+  const sync = await handleQueueSyncRecommendedApi();
+  if (sync && sync.ok) {
+    return { changed: true, reason: "new_keywords_added", source: sync.source || "api" };
+  }
+
+  const completed = (queue.keywords || []).filter((k) => k.status === "completed");
+  if (!completed.length) {
+    return { changed: false, reason: "nothing_to_requeue" };
+  }
+
+  const now = nowIso();
+  completed.forEach((k) => {
+    k.status = "pending";
+    k.startedAt = null;
+    k.completedAt = null;
+    k.runId = null;
+    k.lastError = null;
+  });
+
+  const delayRange = queue.settings?.delayBetweenKeywords || { min: 120000, max: 300000 };
+  queue.nextRunNotBefore = Date.now() + randomDelay(delayRange.min, delayRange.max);
+  queue.cycleResetAt = now;
+  await QueueMgr.saveQueue(queue);
+
+  return { changed: true, reason: "completed_requeued", requeued: completed.length };
+}
+
 async function startQueueProcessor() {
   if (queueProcessorInterval) return;
 
@@ -495,9 +528,20 @@ async function startQueueProcessor() {
 
     const nextKw = QueueMgr.getNextPendingKeyword(queue);
     if (!nextKw) {
-      // All done
-      await QueueMgr.stopQueue();
+      await refillQueueForContinuousCycle(queue);
       return;
+    }
+
+    const defaultTargets = getDefaultKeywordTargets(queue);
+    const hasOnlyJobsTarget = Array.isArray(nextKw.targets)
+      && nextKw.targets.length === 1
+      && normalizeTarget(nextKw.targets[0]) === "jobs";
+    if (
+      (nextKw.source === "auto_generated" || nextKw.source === "orchestrator_api" || nextKw.source === "llm_keyword_strategy")
+      && hasOnlyJobsTarget
+    ) {
+      nextKw.targets = defaultTargets;
+      await QueueMgr.saveQueue(queue);
     }
 
     // Start this keyword
@@ -897,11 +941,6 @@ async function handleProfileContextUpdated(message) {
 
 async function ensureProfileSyncedBeforeRun() {
   const state = await getProfileSyncState();
-  const context = state.lastProfileContext;
-  if (context && context.profileText) {
-    return syncProfileFromContext(context, { force: false });
-  }
-
   const bootstrapUrl = state.sourceUrl || DEFAULT_UPWORK_PROFILE_URL;
   try {
     const bootstrapContext = await bootstrapProfileContextFromTab(bootstrapUrl);
@@ -911,15 +950,24 @@ async function ensureProfileSyncedBeforeRun() {
         message: bootstrapContext.error || "Profile bootstrap failed",
         sourceUrl: bootstrapUrl
       });
+      const context = state.lastProfileContext;
+      if (context && context.profileText) {
+        return syncProfileFromContext(context, { force: false });
+      }
       return { ok: true, skipped: true, reason: "bootstrap_failed" };
     }
-    return syncProfileFromContext(bootstrapContext.context, { force: true });
+    // Use fresh scraped profile context; sync is still cooldown-aware via hash.
+    return syncProfileFromContext(bootstrapContext.context, { force: false });
   } catch (error) {
     await setProfileSyncState({
       status: "warning",
       message: error?.message || "Profile bootstrap exception",
       sourceUrl: bootstrapUrl
     });
+    const context = state.lastProfileContext;
+    if (context && context.profileText) {
+      return syncProfileFromContext(context, { force: false });
+    }
     return { ok: true, skipped: true, reason: "bootstrap_exception" };
   }
 }
@@ -1245,6 +1293,7 @@ async function moveToNextTarget(state) {
 
   const nextTarget = state.active.targets[state.active.targetIndex];
   const url = buildSearchUrl(nextTarget, state.active.keyword, 1);
+  await delay(randomDelay(TARGET_SWITCH_DELAY_RANGE.min, TARGET_SWITCH_DELAY_RANGE.max));
   await new Promise((resolve) => {
     chrome.tabs.update(state.active.tabId, { url }, () => resolve());
   });
@@ -1950,19 +1999,45 @@ function buildProfileHintTerms(profileState) {
 function isKeywordAlignedWithProfile(keyword, profileTerms) {
   if (!keyword) return false;
   if (!profileTerms || profileTerms.size === 0) return true;
-  const normalized = String(keyword).toLowerCase();
-  for (const term of profileTerms) {
-    if (normalized.includes(term) || term.includes(normalized)) {
-      return true;
+
+  // Tokenize the keyword into individual words (2+ chars)
+  const kwTokens = String(keyword).toLowerCase()
+    .split(/[\s\-_\/,;:.]+/)
+    .filter(t => t.length >= 2);
+
+  if (kwTokens.length === 0) return true; // single-char keyword edge case
+
+  // Count how many keyword tokens overlap with profile terms
+  let hits = 0;
+  for (const token of kwTokens) {
+    for (const term of profileTerms) {
+      if (token.includes(term) || term.includes(token)) {
+        hits++;
+        break; // each kwToken counts at most once
+      }
     }
   }
-  return false;
+
+  // At least 1 token must match, or for multi-word keywords, >= 30% overlap
+  const threshold = kwTokens.length <= 2 ? 1 : Math.ceil(kwTokens.length * 0.3);
+  return hits >= threshold;
+}
+
+function getDefaultKeywordTargets(queue) {
+  const fallback = ["jobs", "talent", "projects"];
+  const source = Array.isArray(queue?.settings?.targets) ? queue.settings.targets : fallback;
+  const targets = source
+    .map(normalizeTarget)
+    .filter((t) => ["jobs", "talent", "projects"].includes(t));
+  const unique = targets.filter((value, index, arr) => arr.indexOf(value) === index);
+  return unique.length ? unique : fallback;
 }
 
 async function loadAutoKeywords() {
   const queue = await QueueMgr.getQueue();
   const profileState = await getProfileSyncState();
   const profileTerms = buildProfileHintTerms(profileState);
+  const defaultTargets = getDefaultKeywordTargets(queue);
   const now = new Date().toISOString();
   let addedCount = 0;
 
@@ -1978,7 +2053,7 @@ async function loadAutoKeywords() {
     queue.keywords.push({
       id: `kw_auto_${Date.now()}_${addedCount}`,
       keyword: kw.keyword,
-      targets: ["jobs"],
+      targets: defaultTargets,
       maxPages: 3,
       status: "pending",
       addedAt: now,
@@ -2007,6 +2082,66 @@ async function syncRecommendedKeywordsFromApi(limit = MAX_API_KEYWORD_INJECTION)
   }
   lastApiKeywordSyncAttemptAt = now;
 
+  // 1) Prefer LLM-driven keyword strategy (uses profile + keyword metrics)
+  const llmReq = await requestOrchestrator(
+    "/v1/llm/keyword-strategy",
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) },
+    20000
+  );
+
+  if (llmReq.ok && llmReq.response && llmReq.response.ok) {
+    const payload = await llmReq.response.json().catch(() => ({}));
+    const keep = Array.isArray(payload.keep) ? payload.keep : [];
+    const modify = Array.isArray(payload.modify) ? payload.modify : [];
+    const add = Array.isArray(payload.add) ? payload.add : [];
+
+    const suggestions = [];
+    keep.forEach((k) => suggestions.push(String(k || "").trim()));
+    modify.forEach((m) => suggestions.push(String((m && m.to) || "").trim()));
+    add.forEach((a) => suggestions.push(String((a && a.keyword) || "").trim()));
+
+    const filtered = [...new Set(suggestions.filter(Boolean))].slice(0, Math.max(1, Math.min(limit, 20)));
+    if (filtered.length) {
+      const queue = await QueueMgr.getQueue();
+      const profileState = await getProfileSyncState();
+      const profileTerms = buildProfileHintTerms(profileState);
+      const defaultTargets = getDefaultKeywordTargets(queue);
+      const nowIsoText = new Date().toISOString();
+      let addedCount = 0;
+
+      for (const keywordRaw of filtered) {
+        const keyword = String(keywordRaw || "").trim();
+        if (!keyword) continue;
+        if (!isKeywordAlignedWithProfile(keyword, profileTerms)) continue;
+        const exists = queue.keywords.find((k) => k.keyword.toLowerCase() === keyword.toLowerCase());
+        if (exists) continue;
+
+        queue.keywords.push({
+          id: `kw_llm_${Date.now()}_${addedCount}`,
+          keyword,
+          targets: defaultTargets,
+          maxPages: queue.settings.maxPages,
+          status: "pending",
+          addedAt: nowIsoText,
+          startedAt: null,
+          completedAt: null,
+          errorCount: 0,
+          lastError: null,
+          runId: null,
+          results: { jobs: 0, talent: 0, projects: 0 },
+          source: "llm_keyword_strategy"
+        });
+        addedCount += 1;
+        if (addedCount >= limit) break;
+      }
+
+      if (addedCount > 0) {
+        await QueueMgr.saveQueue(queue);
+        return { ok: true, addedCount, source: "llm" };
+      }
+    }
+  }
+
   const request = await requestOrchestrator(
     `/v1/recommendations/keywords?limit=${Math.max(1, Math.min(limit, 20))}`,
     { method: "GET" },
@@ -2026,6 +2161,7 @@ async function syncRecommendedKeywordsFromApi(limit = MAX_API_KEYWORD_INJECTION)
   const queue = await QueueMgr.getQueue();
   const profileState = await getProfileSyncState();
   const profileTerms = buildProfileHintTerms(profileState);
+  const defaultTargets = getDefaultKeywordTargets(queue);
   const nowIsoText = new Date().toISOString();
   let addedCount = 0;
 
@@ -2047,7 +2183,7 @@ async function syncRecommendedKeywordsFromApi(limit = MAX_API_KEYWORD_INJECTION)
     queue.keywords.push({
       id: `kw_api_${Date.now()}_${addedCount}`,
       keyword,
-      targets: ["jobs"],
+      targets: defaultTargets,
       maxPages: 3,
       status: "pending",
       addedAt: nowIsoText,

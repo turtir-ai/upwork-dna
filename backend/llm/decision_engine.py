@@ -14,7 +14,7 @@ from typing import Optional
 
 from .client import LLMClient, LLMError
 from .job_analyzer import JobAnalysis
-from .prompts import BATCH_RANK_SYSTEM, BATCH_RANK_PROMPT
+from .prompts import get_batch_rank_system, get_batch_rank_prompt
 
 logger = logging.getLogger("upwork-dna.llm.decision")
 
@@ -221,13 +221,13 @@ class DecisionEngine:
                     "action": a.recommended_action,
                 })
 
-        prompt = BATCH_RANK_PROMPT.format(
+        prompt = get_batch_rank_prompt().format(
             analyses_json=json.dumps(analyses_for_llm, indent=2)
         )
 
         result = await self.client.chat_json(
             prompt,
-            system=BATCH_RANK_SYSTEM,
+            system=get_batch_rank_system(),
             temperature=0.3,
         )
 

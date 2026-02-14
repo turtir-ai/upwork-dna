@@ -347,31 +347,62 @@ async def decide_jobs(
     """
     Run the Decision Engine on analyzed jobs.
     Returns prioritized HOT/WARM/COLD queue.
+    Uses CACHED analysis from job_opportunities — does NOT re-analyze.
     """
     db = get_db_session()
     try:
-        # Get jobs that have been analyzed (have opportunity records)
-        query = db.query(JobRaw).join(
+        # Get jobs that have been analyzed (have opportunity records with LLM data)
+        query = db.query(JobRaw, JobOpportunity).join(
             JobOpportunity, JobRaw.job_key == JobOpportunity.job_key
         )
         if keyword:
             query = query.filter(JobRaw.keyword == keyword)
 
-        job_rows = query.order_by(
+        rows = query.order_by(
             JobRaw.scraped_at.desc(),
             JobOpportunity.fit_score.desc(),
         ).limit(limit).all()
 
-        if not job_rows:
+        if not rows:
             return DecisionResponse(timestamp=datetime.utcnow().isoformat())
 
-        # Re-analyze or use cached analyses
-        job_dicts = [_row_to_dict(j) for j in job_rows]
-        client = get_client()
-        analyzer = JobAnalyzer(client)
-        analyses = await analyzer.analyze_batch(job_dicts)
+        # Build JobAnalysis objects from CACHED opportunity data (no re-analysis)
+        analyses = []
+        for job_row, opp_row in rows:
+            cached_reasons = {}
+            try:
+                cached_reasons = json.loads(opp_row.reasons or "{}")
+                if isinstance(cached_reasons, list):
+                    cached_reasons = {"tags": cached_reasons}
+            except Exception:
+                cached_reasons = {}
 
-        # Run decision engine
+            analysis = JobAnalysis(
+                job_key=job_row.job_key,
+                title=job_row.title or "",
+                summary_1line=cached_reasons.get("llm_summary", ""),
+                scope_clarity=cached_reasons.get("scope_clarity", 0.5),
+                budget_fit=cached_reasons.get("budget_fit", 0.5),
+                technical_fit=cached_reasons.get("technical_fit", 0.5),
+                risk_flags=cached_reasons.get("risk_flags", []),
+                estimated_effort_hours=cached_reasons.get("estimated_effort_hours", 0),
+                competition_signal=cached_reasons.get("competition_signal", "medium"),
+                client_quality=cached_reasons.get("client_quality", 0.5),
+                recommended_action=cached_reasons.get("llm_action", "WATCH"),
+                recommended_bid=cached_reasons.get("recommended_bid", ""),
+                opening_hook=cached_reasons.get("opening_hook", ""),
+                questions_to_ask=cached_reasons.get("questions_to_ask", []),
+                deliverables_list=cached_reasons.get("deliverables_list", []),
+                reasoning=cached_reasons.get("llm_reasoning", ""),
+                composite_score=cached_reasons.get("composite_score", 0.0),
+            )
+            # Normalize composite to 0-1 range if needed
+            if analysis.composite_score > 1.0:
+                analysis.composite_score = analysis.composite_score / 100.0
+            analyses.append(analysis)
+
+        # Run decision engine on cached analyses (no LLM re-call for scoring)
+        client = get_client()
         engine = DecisionEngine(client=client, use_llm_ranking=use_llm_ranking)
         batch = await engine.decide(analyses)
 
@@ -794,6 +825,7 @@ def _row_to_dict(row: JobRaw) -> dict:
         "skills": row.skills or "",
         "keyword": row.keyword or "",
         "url": row.url or "",
+        "posted_at": row.posted_at.isoformat() if getattr(row, "posted_at", None) else None,
     }
 
 

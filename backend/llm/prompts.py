@@ -1,29 +1,43 @@
 """
 Prompt templates for LLM-powered Upwork DNA analysis.
-All prompts dynamically include the freelancer profile from profile_config.py.
-"""
-from .profile_config import get_profile_summary, PROFILE
 
-# ─── Build dynamic profile section ─────────────────────────────
-_PROFILE_SUMMARY = get_profile_summary()
+IMPORTANT: All prompts are generated via functions (not module-level constants)
+so that dynamic profile changes (via profile_sync) take effect immediately
+without requiring a server restart.
+"""
+from .profile_config import get_profile_summary, get_effective_profile
+
+
+# ---------------------------------------------------------------------------
+# Helper: always-fresh profile access
+# ---------------------------------------------------------------------------
+def _p():
+    """Return the latest effective profile (static + dynamic sync)."""
+    return get_effective_profile()
+
 
 # ---------------------------------------------------------------------------
 # Job Analyzer
 # ---------------------------------------------------------------------------
-JOB_ANALYSIS_SYSTEM = f"""You are an expert Upwork strategy advisor for a freelancer with this profile:
+def get_job_analysis_system() -> str:
+    p = _p()
+    return f"""You are an expert Upwork strategy advisor for a freelancer with this profile:
 
-**Name**: {PROFILE['name']}
-**Title**: {PROFILE['title']}
-**Core Skills**: {', '.join(PROFILE['core_skills'][:10])}
-**Rate**: {PROFILE['hourly_range']}
-**Upwork Status**: {PROFILE['total_upwork_jobs']} completed jobs (early stage, building reputation)
+**Name**: {p['name']}
+**Title**: {p['title']}
+**Core Skills**: {', '.join(p['core_skills'][:10])}
+**Rate**: {p['hourly_range']}
+**Upwork Status**: {p['total_upwork_jobs']} completed jobs (early stage, building reputation)
 
 You analyze job postings to determine if they are a good match for THIS specific freelancer.
 Consider their skills, rate, experience level, and current strategy (building reputation).
 
 You MUST respond with a single valid JSON object. No other text."""
 
-JOB_ANALYSIS_PROMPT = """Analyze this Upwork job posting for my profile and return a structured JSON assessment.
+# ---------------------------------------------------------------------------
+# Job Analysis Prompt (template – caller uses .format(title=..., ...))
+# ---------------------------------------------------------------------------
+_JOB_ANALYSIS_PROMPT_TEMPLATE = """Analyze this Upwork job posting for my profile and return a structured JSON assessment.
 
 ## Job Details
 - **Title**: {{title}}
@@ -91,23 +105,33 @@ JOB_ANALYSIS_PROMPT = """Analyze this Upwork job posting for my profile and retu
   "questions_to_ask": ["clarifying questions to ask the client"],
   "deliverables_list": ["concrete deliverables I could promise"],
   "reasoning": "Explain WHY this is/isn't a good fit for MY profile and current strategy"
-}}}}""".format(
-    profile=_PROFILE_SUMMARY,
-    rate=PROFILE["hourly_rate"],
-    jobs_count=PROFILE["total_upwork_jobs"],
-)
+}}}}"""
+
+
+def get_job_analysis_prompt() -> str:
+    p = _p()
+    return _JOB_ANALYSIS_PROMPT_TEMPLATE.format(
+        profile=get_profile_summary(),
+        rate=p["hourly_rate"],
+        jobs_count=p["total_upwork_jobs"],
+    )
 
 
 # ---------------------------------------------------------------------------
 # Decision Engine - Batch ranking
 # ---------------------------------------------------------------------------
-BATCH_RANK_SYSTEM = f"""You are a strategic Upwork advisor for {PROFILE['name']}, 
-an early-stage freelancer ({PROFILE['total_upwork_jobs']} completed jobs) specializing in {PROFILE['title']}.
+def get_batch_rank_system() -> str:
+    p = _p()
+    return f"""You are a strategic Upwork advisor for {p['name']}, 
+an early-stage freelancer ({p['total_upwork_jobs']} completed jobs) specializing in {p['title']}.
 Your job is to prioritize which jobs to apply to first based on: skill fit, win probability, 
 review potential, and strategic value for building reputation.
 Respond with valid JSON only."""
 
-BATCH_RANK_PROMPT = """Given these job analyses for my profile, rank them by strategic priority.
+
+def get_batch_rank_prompt() -> str:
+    p = _p()
+    return """Given these job analyses for my profile, rank them by strategic priority.
 
 ## My Strategy
 - Early stage: {jobs} completed job(s) — need to build reputation fast
@@ -133,22 +157,24 @@ Rules:
 - HOT: High skill fit + low competition + verified client + achievable scope — apply immediately
 - WARM: Good fit but some concerns (budget, scope, competition) — apply within a day
 - COLD: Poor fit, too competitive, or too risky for JSS — skip or save for later""".format(
-    jobs=PROFILE["total_upwork_jobs"],
-    rate=PROFILE["hourly_range"],
-)
+        jobs=p["total_upwork_jobs"],
+        rate=p["hourly_range"],
+    )
 
 
 # ---------------------------------------------------------------------------
 # Proposal Generator
 # ---------------------------------------------------------------------------
-PROPOSAL_SYSTEM = f"""You are an expert Upwork proposal writer for {PROFILE['name']}.
+def get_proposal_system() -> str:
+    p = _p()
+    return f"""You are an expert Upwork proposal writer for {p['name']}.
 
 Profile context:
-- {PROFILE['title']}
-- Rate: {PROFILE['hourly_range']}
-- Early stage on Upwork ({PROFILE['total_upwork_jobs']} jobs), so the proposal must be extra compelling
-- Key strengths: {', '.join(PROFILE['core_skills'][:8])}
-- Portfolio: {', '.join(p[:40] for p in PROFILE['portfolio_projects'][:3])}
+- {p['title']}
+- Rate: {p['hourly_range']}
+- Early stage on Upwork ({p['total_upwork_jobs']} jobs), so the proposal must be extra compelling
+- Key strengths: {', '.join(p['core_skills'][:8])}
+- Portfolio: {', '.join(proj[:40] for proj in p['portfolio_projects'][:3])}
 
 Write concise, personalized cover letters that:
 1. Show you READ and UNDERSTOOD the job posting
@@ -158,7 +184,9 @@ Write concise, personalized cover letters that:
 
 Write in first person. Respond with valid JSON only."""
 
-PROPOSAL_PROMPT = """Write a winning Upwork proposal for this job.
+
+def get_proposal_prompt() -> str:
+    return """Write a winning Upwork proposal for this job.
 
 ## Job Analysis
 {{analysis_json}}
@@ -187,23 +215,28 @@ Guidelines:
 - Include a realistic timeline
 - Since I'm early on Upwork, emphasize: fast delivery, clear communication, and GitHub portfolio as proof
 - End with enthusiasm and a clear next step""".format(
-    profile=_PROFILE_SUMMARY,
-)
+        profile=get_profile_summary(),
+    )
 
 
 # ---------------------------------------------------------------------------
 # Keyword Discovery
 # ---------------------------------------------------------------------------
-KEYWORD_DISCOVERY_SYSTEM = f"""You are an Upwork market researcher helping {PROFILE['name']} 
+def get_keyword_discovery_system() -> str:
+    p = _p()
+    return f"""You are an Upwork market researcher helping {p['name']} 
 find the best keywords to search for jobs matching their skills.
 
-Their profile: {PROFILE['title']}
-Core skills: {', '.join(PROFILE['core_skills'][:10])}
+Their profile: {p['title']}
+Core skills: {', '.join(p['core_skills'][:10])}
 Strategy: Early-stage freelancer building reputation, looking for low-competition niches.
 
 Respond with valid JSON only."""
 
-KEYWORD_DISCOVERY_PROMPT = """Based on these current keyword metrics and my skill profile, suggest new keywords to track.
+
+def get_keyword_discovery_prompt() -> str:
+    p = _p()
+    return """Based on these current keyword metrics and my skill profile, suggest new keywords to track.
 
 ## Current Keywords & Scores
 {{keyword_metrics_json}}
@@ -238,20 +271,25 @@ Rules:
 - Consider keywords that Upwork clients actually search for
 - Prefer actionable phrases over generic terms
 - Include at least 2-3 n8n or automation-related keywords""".format(
-    core=", ".join(PROFILE["core_skills"]),
-    secondary=", ".join(PROFILE["secondary_skills"]),
-    services="\n".join(f"- {s}" for s in PROFILE["service_lines"]),
-)
+        core=", ".join(p["core_skills"]),
+        secondary=", ".join(p["secondary_skills"]),
+        services="\n".join(f"- {s}" for s in p["service_lines"]),
+    )
 
 
 # ---------------------------------------------------------------------------
-# Keyword Strategy Advisor (NEW)
+# Keyword Strategy Advisor
 # ---------------------------------------------------------------------------
-KEYWORD_STRATEGY_SYSTEM = f"""You are a strategic Upwork keyword advisor for {PROFILE['name']}.
+def get_keyword_strategy_system() -> str:
+    p = _p()
+    return f"""You are a strategic Upwork keyword advisor for {p['name']}.
 You help optimize which keywords to activate, deactivate, or modify based on market data and profile fit.
 Respond with valid JSON only."""
 
-KEYWORD_STRATEGY_PROMPT = """Analyze my current keyword performance and recommend changes.
+
+def get_keyword_strategy_prompt() -> str:
+    p = _p()
+    return """Analyze my current keyword performance and recommend changes.
 
 ## Current Keyword Metrics
 {{keyword_metrics_json}}
@@ -276,7 +314,8 @@ Return a JSON object:
   "add": [{{{{"keyword": "...", "reason": "why to start tracking this", "expected_competition": "low|medium|high"}}}}],
   "overall_strategy": "Summary of recommended keyword strategy changes"
 }}}}""".format(
-    core=", ".join(PROFILE["core_skills"][:10]),
-    ideal=", ".join(PROFILE["ideal_job_keywords"][:10]),
-    avoid=", ".join(PROFILE["avoid_keywords"][:8]),
-)
+        core=", ".join(p["core_skills"][:10]),
+        ideal=", ".join(p.get("ideal_job_keywords", [])[:10]),
+        avoid=", ".join(p.get("avoid_keywords", [])[:8]),
+    )
+

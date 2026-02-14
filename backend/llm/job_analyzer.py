@@ -12,8 +12,8 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional
 
 from .client import LLMClient, LLMError
-from .prompts import JOB_ANALYSIS_SYSTEM, JOB_ANALYSIS_PROMPT
-from .profile_config import PROFILE, get_skills_for_matching, get_avoid_keywords
+from .prompts import get_job_analysis_system, get_job_analysis_prompt
+from .profile_config import PROFILE, get_effective_profile, get_skills_for_matching, get_avoid_keywords
 
 logger = logging.getLogger("upwork-dna.llm.analyzer")
 
@@ -138,7 +138,7 @@ class JobAnalyzer:
         title = job.get("title", "Untitled")
 
         try:
-            prompt = JOB_ANALYSIS_PROMPT.format(
+            prompt = get_job_analysis_prompt().format(
                 title=title,
                 budget=job.get("budget", "Not specified"),
                 client_spend=job.get("client_spend", 0) or 0,
@@ -151,7 +151,7 @@ class JobAnalyzer:
 
             data = await self.client.chat_json(
                 prompt,
-                system=JOB_ANALYSIS_SYSTEM,
+                system=get_job_analysis_system(),
                 temperature=0.2,
             )
 
@@ -318,7 +318,8 @@ class JobAnalyzer:
                 analysis.risk_flags.append("CAUTION: unverified, no spend, low budget")
 
         # --- Early-stage strategy: prefer low-competition verified jobs ---
-        if PROFILE.get("total_upwork_jobs", 0) < 5:
+        profile = get_effective_profile()
+        if profile.get("total_upwork_jobs", 0) < 5:
             # Extra caution for new profiles: weak-client jobs should not be immediate APPLY.
             if (
                 (not job.get("payment_verified"))
