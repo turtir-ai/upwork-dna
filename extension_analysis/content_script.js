@@ -391,27 +391,11 @@ function extractProfileContext() {
     return { ok: false, error: "Open an Upwork freelancer profile page first." };
   }
 
-  const headline = getText(
-    document.querySelector(
-      "[data-qa='freelancer-profile-title'], [data-qa='title'], h1, h2"
-    )
-  );
-
-  const overview = getText(
-    document.querySelector(
-      "[data-qa='overview'], [data-qa='freelancer-profile-overview'], section p"
-    )
-  );
-
-  const skillNodes = Array.from(
-    document.querySelectorAll(
-      "[data-qa='skill-name'], [data-qa='skills'] span, a[href*='/skills/'], .air3-token"
-    )
-  );
-  const skills = [...new Set(skillNodes.map((el) => getText(el)).filter(Boolean))].slice(0, 40);
+  // --- Rich DOM extraction (same logic validated via MCP Playwright) ---
+  const data = _extractRichProfileData();
 
   const fallbackText = (document.body?.innerText || "").replace(/\s+/g, " ").trim().slice(0, 6000);
-  const profileText = [headline, overview, skills.join(" "), fallbackText]
+  const profileText = [data.headline, data.overview, (data.skills || []).join(" "), fallbackText]
     .filter(Boolean)
     .join("\n\n")
     .trim();
@@ -438,10 +422,242 @@ function extractProfileContext() {
   return {
     ok: true,
     upworkUrl: window.location.href,
-    headline,
-    skills,
-    profileText
+    headline: data.headline || "",
+    skills: data.skills || [],
+    profileText,
+    // Rich profile fields — sent to backend for direct save
+    richProfile: {
+      name: data.name || "",
+      headline: data.headline || "",
+      overview: data.overview || "",
+      hourly_rate: data.hourly_rate || "",
+      total_jobs: data.total_jobs || 0,
+      hours_per_week: data.hours_per_week || "",
+      location: data.location || "",
+      skills: data.skills || [],
+      badges: data.badges || [],
+      work_history: data.work_history || [],
+      portfolio: data.portfolio || [],
+      online_status: data.online_status || "",
+      contract_to_hire: data.contract_to_hire || false
+    }
   };
+}
+
+/**
+ * Extract ALL profile data from the DOM — rich structured extraction.
+ * Validated via MCP Playwright on the live public profile page.
+ */
+function _extractRichProfileData() {
+  const data = {};
+  const mainEl = document.querySelector("main");
+  const mainText = mainEl ? mainEl.innerText : "";
+
+  // --- Name ---
+  data.name = document.title.split(" - ")[0].trim();
+
+  // --- Headline ---
+  data.headline = "";
+  const h3s = mainEl ? mainEl.querySelectorAll("h3") : [];
+  for (const h3 of h3s) {
+    const t = h3.textContent.trim();
+    if (t.includes("|") || t.includes("Engineer") || t.includes("Developer")
+        || t.includes("Automation") || t.includes("Freelancer") || t.includes("Expert")
+        || t.includes("Specialist") || t.includes("Designer") || t.includes("Consultant")) {
+      data.headline = t;
+      break;
+    }
+  }
+  if (!data.headline) {
+    // Fallback to data-qa selectors
+    const hqEl = document.querySelector(
+      "[data-qa='freelancer-profile-title'], [data-qa='title']"
+    );
+    data.headline = hqEl ? hqEl.textContent.trim() : data.name;
+  }
+
+  // --- Location ---
+  data.location = "";
+  if (mainEl) {
+    mainEl.querySelectorAll("*").forEach(function(el) {
+      if (el.children.length === 0 && el.textContent.trim() === "Turkey") {
+        const par = el.parentElement;
+        if (par) {
+          const siblings = Array.from(par.children)
+            .map(function(c) { return c.textContent.trim(); })
+            .filter(Boolean);
+          data.location = siblings.join(" ").replace(/\s+/g, " ");
+        }
+      }
+    });
+  }
+  if (!data.location) {
+    const locEl = document.querySelector("[data-qa='location'], [data-test='Location']");
+    if (locEl) data.location = locEl.textContent.trim();
+  }
+
+  // --- Hourly Rate ---
+  data.hourly_rate = "";
+  if (mainEl) {
+    mainEl.querySelectorAll("*").forEach(function(el) {
+      var txt = el.textContent.trim();
+      if (/^\$\d+(\.\d+)?\/hr$/.test(txt)) data.hourly_rate = txt;
+    });
+  }
+
+  // --- Overview / Description ---
+  const descBlocks = [];
+  if (mainEl) {
+    mainEl.querySelectorAll("div > div > div > div").forEach(function(el) {
+      var t = el.innerText ? el.innerText.trim() : "";
+      if (t.length > 200 && !t.includes("Work history") && !t.includes("Portfolio")
+          && !t.includes("Skills") && !t.includes("Browse similar")) {
+        descBlocks.push(t);
+      }
+    });
+  }
+  if (descBlocks.length > 0) {
+    data.overview = descBlocks.reduce(function(a, b) { return a.length > b.length ? a : b; }).substring(0, 3000);
+  } else {
+    // Fallback: data-qa selectors
+    const ovEl = document.querySelector(
+      "[data-qa='overview'], [data-qa='freelancer-profile-overview']"
+    );
+    data.overview = ovEl ? ovEl.textContent.trim().substring(0, 3000) : "";
+  }
+
+  // --- Stats (Total Jobs, Hours per Week) ---
+  data.total_jobs = 0;
+  data.hours_per_week = "";
+  if (mainEl) {
+    mainEl.querySelectorAll("*").forEach(function(el) {
+      var txt = el.textContent.trim();
+      if (txt === "Total jobs") {
+        var prev = el.previousElementSibling;
+        if (prev) data.total_jobs = parseInt(prev.textContent.trim()) || 0;
+      }
+      if (txt === "Hours per week") {
+        var next = el.nextElementSibling;
+        if (next) data.hours_per_week = next.textContent.trim();
+      }
+    });
+  }
+  if (data.total_jobs === 0) {
+    var m = mainText.match(/(\d+)\s*\n?\s*Total jobs/);
+    data.total_jobs = m ? parseInt(m[1]) : 0;
+  }
+
+  // --- Skills ---
+  data.skills = [];
+  document.querySelectorAll("h4").forEach(function(h4) {
+    if (h4.textContent.trim() === "Skills") {
+      var container = h4.parentElement;
+      for (var i = 0; i < 5 && container; i++) {
+        var ul = container.querySelector("ul");
+        if (ul && ul.querySelectorAll("li").length > 3) {
+          ul.querySelectorAll("li").forEach(function(li) {
+            var walker = document.createTreeWalker(li, NodeFilter.SHOW_TEXT);
+            var texts = [];
+            while (walker.nextNode()) {
+              var t = walker.currentNode.textContent.trim();
+              if (t && !t.startsWith("Hire ")) texts.push(t);
+            }
+            var skill = texts[texts.length - 1] || "";
+            if (skill && skill.length < 60) data.skills.push(skill);
+          });
+          break;
+        }
+        container = container.parentElement;
+      }
+    }
+  });
+  // Fallback: data-qa / air3 token selectors
+  if (data.skills.length === 0) {
+    var skillNodes = Array.from(
+      document.querySelectorAll(
+        "[data-qa='skill-name'], [data-qa='skills'] span, a[href*='/skills/'], .air3-token"
+      )
+    );
+    data.skills = [
+      ...new Set(skillNodes.map(function(el) { return getText(el); }).filter(Boolean))
+    ].slice(0, 40);
+  }
+
+  // --- Badges ---
+  data.badges = [];
+  var badgeNames = [
+    "Clear Communicator", "Accountable for Outcomes", "Committed to Quality",
+    "Detail Oriented", "Solution Oriented", "Proactive", "High Performer"
+  ];
+  if (mainEl) {
+    mainEl.querySelectorAll("button").forEach(function(btn) {
+      var t = btn.textContent.trim();
+      if (badgeNames.some(function(b) { return t.includes(b); })) data.badges.push(t);
+    });
+  }
+
+  // --- Work History ---
+  data.work_history = [];
+  var tabPanel = document.querySelector('[role="tabpanel"]');
+  if (tabPanel) {
+    var items = tabPanel.querySelectorAll(":scope > div, :scope > article");
+    var processItem = function(el) {
+      var inner = el.innerText || "";
+      var title = inner.split("\n")[0] || "";
+      var rating = "";
+      el.querySelectorAll("*").forEach(function(c) {
+        if (c.textContent.includes("Rating is") && c.textContent.includes("out of 5"))
+          rating = c.textContent.trim();
+      });
+      var dateRange = "";
+      var dm = inner.match(/((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4})\s*-\s*((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4})/);
+      if (dm) dateRange = dm[1] + " - " + dm[2];
+      var review = "";
+      el.querySelectorAll("*").forEach(function(c) {
+        var t = c.textContent.trim();
+        if (t.startsWith('"') && t.endsWith('"') && t.length > 5) review = t;
+      });
+      return { title: title.substring(0, 200), rating: rating, dateRange: dateRange, review: review };
+    };
+    if (items.length > 0) {
+      items.forEach(function(item) {
+        var h = processItem(item);
+        if (h.title) data.work_history.push(h);
+      });
+    } else {
+      data.work_history.push(processItem(tabPanel));
+    }
+  }
+
+  // --- Portfolio ---
+  data.portfolio = [];
+  if (mainEl) {
+    mainEl.querySelectorAll("h3").forEach(function(h3) {
+      if (h3.textContent.trim() === "Portfolio") {
+        var container = h3.closest("div");
+        if (container) {
+          container.querySelectorAll("*").forEach(function(el) {
+            var style = window.getComputedStyle(el);
+            if (style.cursor === "pointer" && el.tagName === "DIV") {
+              var t = el.textContent.trim();
+              if (t.length > 10 && t.length < 200 && !t.includes("Sign up") && !t.includes("Want to see more"))
+                data.portfolio.push(t);
+            }
+          });
+        }
+      }
+    });
+  }
+  data.portfolio = [...new Set(data.portfolio)];
+
+  // --- Online Status ---
+  var statusImg = document.querySelector('img[alt*="Status"]');
+  data.online_status = statusImg ? statusImg.alt.replace("Status: ", "") : "";
+
+  // --- Contract to hire ---
+  data.contract_to_hire = mainText.includes("Open to contract to hire");
+
+  return data;
 }
 
 function isTalentDetailRoute(url) {
@@ -2131,7 +2347,8 @@ async function startScrapeFlow() {
         upworkUrl: profile.upworkUrl,
         headline: profile.headline || "",
         skills: profile.skills || [],
-        profileText: profile.profileText || ""
+        profileText: profile.profileText || "",
+        richProfile: profile.richProfile || null
       });
     }
     return;

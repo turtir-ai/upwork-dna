@@ -24,7 +24,13 @@ from llm.proposal_writer import ProposalWriter
 from llm.keyword_discoverer import KeywordDiscoverer
 from llm.keyword_strategy import KeywordStrategyAdvisor
 from llm.profile_config import PROFILE, get_profile_summary, get_effective_profile, get_dynamic_profile_snapshot
-from llm.profile_sync import sync_profile_from_upwork, save_dynamic_profile, build_profile_payload_from_text
+from llm.profile_sync import (
+    sync_profile_from_upwork,
+    save_dynamic_profile,
+    build_profile_payload_from_text,
+    save_rich_profile_from_extension,
+    load_cached_profile as _load_cached_profile,
+)
 from llm.notifier import get_notifier
 
 logger = logging.getLogger("upwork-dna.llm.api")
@@ -160,6 +166,15 @@ class ProfileSyncRequest(BaseModel):
     upwork_url: str = ""
     profile_text: str = ""
     headline: str = ""
+    rich_profile: dict | None = None
+
+
+class RichProfileSyncRequest(BaseModel):
+    """Accepts pre-scraped rich profile data from the Chrome extension."""
+    upwork_url: str = ""
+    headline: str = ""
+    profile_text: str = ""
+    rich_profile: dict
 
 
 class ProfileSyncResponse(BaseModel):
@@ -170,6 +185,18 @@ class ProfileSyncResponse(BaseModel):
     detected_skills: list[str] = []
     headline: str = ""
     overview: str = ""
+    name: str = ""
+    hourly_rate: str = ""
+    total_jobs: int = 0
+    hours_per_week: str = ""
+    location: str = ""
+    skills: list[str] = []
+    badges: list[str] = []
+    work_history: list[dict] = []
+    portfolio: list[str] = []
+    online_status: str = ""
+    contract_to_hire: bool = False
+    source: str = ""
 
 
 def _parse_skill_values(raw_value) -> list[str]:
@@ -704,12 +731,18 @@ async def sync_profile(payload: ProfileSyncRequest):
     """Fetch public Upwork profile and update dynamic keyword model."""
     upwork_url = payload.upwork_url.strip() or PROFILE.get("upwork_url", "")
     manual_text = payload.profile_text.strip()
+    rich = payload.rich_profile
 
-    if not upwork_url and not manual_text:
+    if not upwork_url and not manual_text and not rich:
         raise HTTPException(status_code=400, detail="Missing upwork_url or profile_text")
 
     try:
-        if manual_text:
+        if rich and isinstance(rich, dict) and rich.get("skills"):
+            # Extension sent rich DOM-scraped data — save directly, no Playwright needed
+            synced = await asyncio.to_thread(
+                save_rich_profile_from_extension, rich, upwork_url
+            )
+        elif manual_text:
             synced = build_profile_payload_from_text(
                 profile_text=manual_text,
                 upwork_url=upwork_url,
@@ -717,7 +750,17 @@ async def sync_profile(payload: ProfileSyncRequest):
             )
             await asyncio.to_thread(save_dynamic_profile, synced)
         else:
-            synced = await asyncio.to_thread(sync_profile_from_upwork, upwork_url)
+            # Playwright fallback — may fail due to Cloudflare
+            try:
+                synced = await asyncio.to_thread(sync_profile_from_upwork, upwork_url)
+            except Exception as pw_err:
+                logger.warning(f"Playwright scrape failed: {pw_err}, falling back to cached profile")
+                cached = _load_cached_profile()
+                if cached:
+                    cached["source"] = "cached_profile"
+                    synced = cached
+                else:
+                    raise
 
         return ProfileSyncResponse(
             status="ok",
@@ -727,6 +770,18 @@ async def sync_profile(payload: ProfileSyncRequest):
             detected_skills=synced.get("detected_skills", []),
             headline=synced.get("headline", ""),
             overview=synced.get("overview", ""),
+            name=synced.get("name", ""),
+            hourly_rate=synced.get("hourly_rate", ""),
+            total_jobs=synced.get("total_jobs", 0),
+            hours_per_week=synced.get("hours_per_week", ""),
+            location=synced.get("location", ""),
+            skills=synced.get("skills", []),
+            badges=synced.get("badges", []),
+            work_history=synced.get("work_history", []),
+            portfolio=synced.get("portfolio", []),
+            online_status=synced.get("online_status", ""),
+            contract_to_hire=synced.get("contract_to_hire", False),
+            source=synced.get("source", ""),
         )
     except Exception as e:
         logger.error(f"Profile sync failed: {e}")
@@ -734,9 +789,49 @@ async def sync_profile(payload: ProfileSyncRequest):
             status_code=502,
             detail=(
                 f"Profile sync failed: {e}. "
-                "If Upwork blocks server-side fetch (403), call this endpoint with profile_text to sync dynamically."
+                "Try syncing from the Chrome extension instead (Sync Profile button)."
             ),
         )
+
+
+@router.post("/profile/sync-rich", response_model=ProfileSyncResponse)
+async def sync_profile_rich(payload: RichProfileSyncRequest):
+    """Receive pre-scraped rich profile data from the Chrome extension — no Playwright needed."""
+    upwork_url = payload.upwork_url.strip() or PROFILE.get("upwork_url", "")
+    rich = payload.rich_profile
+
+    if not rich or not isinstance(rich, dict):
+        raise HTTPException(status_code=400, detail="Missing rich_profile data")
+
+    try:
+        synced = await asyncio.to_thread(
+            save_rich_profile_from_extension, rich, upwork_url
+        )
+
+        return ProfileSyncResponse(
+            status="ok",
+            synced_at=synced.get("synced_at", ""),
+            upwork_url=synced.get("upwork_url", ""),
+            extracted_keywords=synced.get("extracted_keywords", []),
+            detected_skills=synced.get("detected_skills", []),
+            headline=synced.get("headline", ""),
+            overview=synced.get("overview", ""),
+            name=synced.get("name", ""),
+            hourly_rate=synced.get("hourly_rate", ""),
+            total_jobs=synced.get("total_jobs", 0),
+            hours_per_week=synced.get("hours_per_week", ""),
+            location=synced.get("location", ""),
+            skills=synced.get("skills", []),
+            badges=synced.get("badges", []),
+            work_history=synced.get("work_history", []),
+            portfolio=synced.get("portfolio", []),
+            online_status=synced.get("online_status", ""),
+            contract_to_hire=synced.get("contract_to_hire", False),
+            source=synced.get("source", ""),
+        )
+    except Exception as e:
+        logger.error(f"Rich profile sync failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Rich profile sync failed: {e}")
 
 
 @router.get("/keyword-fit", response_model=list[KeywordFitResponse])

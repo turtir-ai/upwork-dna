@@ -159,7 +159,7 @@ def _load_dynamic_profile() -> dict[str, Any]:
 def get_effective_profile() -> dict[str, Any]:
     """
     Merge static profile with latest dynamic sync payload.
-    Dynamic sync currently augments keyword/skill matching fields.
+    Dynamic sync augments keyword/skill/stat fields with live Upwork data.
     """
     profile = dict(PROFILE)
     dynamic = _load_dynamic_profile()
@@ -176,6 +176,30 @@ def get_effective_profile() -> dict[str, Any]:
         profile["title"] = dynamic["headline"]
     if dynamic.get("upwork_url"):
         profile["upwork_url"] = dynamic["upwork_url"]
+
+    # --- Merge live stats from Playwright scrape ---
+    if dynamic.get("total_jobs") is not None and dynamic.get("source") == "playwright_public_profile":
+        profile["total_upwork_jobs"] = dynamic["total_jobs"]
+    if dynamic.get("hourly_rate"):
+        profile["hourly_rate_live"] = dynamic["hourly_rate"]
+    if dynamic.get("hours_per_week"):
+        profile["hours_per_week"] = dynamic["hours_per_week"]
+    if dynamic.get("location"):
+        profile["location"] = dynamic["location"]
+    if dynamic.get("online_status"):
+        profile["online_status"] = dynamic["online_status"]
+    if dynamic.get("work_history"):
+        profile["work_history"] = dynamic["work_history"]
+    if dynamic.get("skills"):
+        profile["live_skills"] = dynamic["skills"]
+    if dynamic.get("badges"):
+        profile["badges"] = dynamic["badges"]
+    if dynamic.get("portfolio"):
+        profile["live_portfolio"] = dynamic["portfolio"]
+    if dynamic.get("contract_to_hire"):
+        profile["contract_to_hire"] = dynamic["contract_to_hire"]
+    if dynamic.get("overview"):
+        profile["live_overview"] = dynamic["overview"]
 
     profile["dynamic_synced_at"] = dynamic.get("synced_at")
     profile["dynamic_keywords"] = extracted_keywords

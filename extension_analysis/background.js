@@ -21,6 +21,10 @@ const BACKEND_PROFILE_SYNC_ENDPOINTS = [
   "http://127.0.0.1:8000/v1/llm/profile/sync",
   "http://localhost:8000/v1/llm/profile/sync"
 ];
+const BACKEND_RICH_PROFILE_SYNC_ENDPOINTS = [
+  "http://127.0.0.1:8000/v1/llm/profile/sync-rich",
+  "http://localhost:8000/v1/llm/profile/sync-rich"
+];
 const PROFILE_AUTO_SYNC_COOLDOWN_MS = 1000 * 60 * 30;
 const DEFAULT_UPWORK_PROFILE_URL = "https://www.upwork.com/freelancers/ttimur";
 let activeOrchestratorBase = ORCHESTRATOR_API_BASES[0];
@@ -805,23 +809,31 @@ function getActiveTab() {
 async function postProfileSync(payload) {
   let lastError = "";
 
-  for (const endpoint of BACKEND_PROFILE_SYNC_ENDPOINTS) {
-    try {
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-      });
+  // If rich profile data is available, try the rich endpoint first
+  const hasRichData = payload.rich_profile && Object.keys(payload.rich_profile).length > 0;
+  const endpointSets = hasRichData
+    ? [BACKEND_RICH_PROFILE_SYNC_ENDPOINTS, BACKEND_PROFILE_SYNC_ENDPOINTS]
+    : [BACKEND_PROFILE_SYNC_ENDPOINTS];
 
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        lastError = data?.detail || `HTTP ${response.status}`;
-        continue;
+  for (const endpoints of endpointSets) {
+    for (const endpoint of endpoints) {
+      try {
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          lastError = data?.detail || `HTTP ${response.status}`;
+          continue;
+        }
+
+        return { ok: true, endpoint, data };
+      } catch (error) {
+        lastError = error?.message || "Network error";
       }
-
-      return { ok: true, endpoint, data };
-    } catch (error) {
-      lastError = error?.message || "Network error";
     }
   }
 
@@ -846,7 +858,8 @@ async function handleSyncProfileFromActiveTab() {
   const payload = {
     upwork_url: extracted.upworkUrl || tab.url,
     headline: extracted.headline || "",
-    profile_text: extracted.profileText || ""
+    profile_text: extracted.profileText || "",
+    rich_profile: extracted.richProfile || null
   };
 
   const syncResult = await postProfileSync(payload);
@@ -863,9 +876,11 @@ async function handleSyncProfileFromActiveTab() {
     status: "ok",
     sourceUrl: payload.upwork_url,
     headline: payload.headline,
+    skillCount: (syncResult.data?.skills || []).length,
     keywordCount: (syncResult.data?.extracted_keywords || []).length,
     syncedAt: syncResult.data?.synced_at || nowIso(),
-    endpoint: syncResult.endpoint
+    endpoint: syncResult.endpoint,
+    source: syncResult.data?.source || ""
   };
   await setProfileSyncState(output);
 
@@ -876,7 +891,8 @@ async function syncProfileFromContext(context, options = {}) {
   const payload = {
     upwork_url: context.upworkUrl || "",
     headline: context.headline || "",
-    profile_text: context.profileText || ""
+    profile_text: context.profileText || "",
+    rich_profile: context.richProfile || null
   };
 
   if (!payload.profile_text) {
@@ -925,7 +941,8 @@ async function handleProfileContextUpdated(message) {
     upworkUrl: message.upworkUrl || "",
     headline: message.headline || "",
     profileText: message.profileText || "",
-    skills: message.skills || []
+    skills: message.skills || [],
+    richProfile: message.richProfile || null
   };
 
   const state = await getProfileSyncState();
